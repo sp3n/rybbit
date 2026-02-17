@@ -329,9 +329,15 @@ export async function trackEvent(request: FastifyRequest, reply: FastifyReply) {
       siteConfiguration
     );
 
+    // Use identified user ID as the session key when available.
+    // This prevents session fragmentation when the anonymous fingerprint (IP/UA-based) changes.
+    const sessionUserKey = payload.identifiedUserId
+      ? `id:${payload.identifiedUserId}`
+      : `anon:${payload.userId}`;
+
     // Update session (use numeric siteId)
     const { sessionId } = await sessionsService.updateSession({
-      userId: payload.userId,
+      userId: sessionUserKey,
       siteId: siteConfiguration.siteId,
     });
 
