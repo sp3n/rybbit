@@ -1,4 +1,4 @@
-import { and, eq, lt } from "drizzle-orm";
+import { and, desc, eq, inArray, lt, sql } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import * as cron from "node-cron";
 import { db } from "../../db/postgres/postgres.js";
@@ -35,34 +35,57 @@ class SessionsService {
       .select()
       .from(activeSessions)
       .where(and(eq(activeSessions.userId, userId), eq(activeSessions.siteId, siteId)))
+      .orderBy(desc(activeSessions.lastActivity), desc(activeSessions.startTime))
       .limit(1);
 
     return existingSession || null;
   }
 
   async updateSession({ userId, siteId }: { userId: string; siteId: number }): Promise<{ sessionId: string }> {
-    const existingSession = await this.getExistingSession(userId, siteId);
+    return db.transaction(async tx => {
+      // Serialize updates for a specific (siteId, userId) pair across app instances.
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(${siteId}, hashtext(${userId}))`);
 
-    if (existingSession) {
-      await db
-        .update(activeSessions)
-        .set({
-          lastActivity: new Date(),
-        })
-        .where(eq(activeSessions.sessionId, existingSession.sessionId));
-      return { sessionId: existingSession.sessionId };
-    }
+      const existingSessions = await tx
+        .select()
+        .from(activeSessions)
+        .where(and(eq(activeSessions.userId, userId), eq(activeSessions.siteId, siteId)))
+        .orderBy(desc(activeSessions.lastActivity), desc(activeSessions.startTime));
 
-    const insertData = {
-      sessionId: nanoid(14),
-      siteId,
-      userId,
-      startTime: new Date(),
-      lastActivity: new Date(),
-    };
+      if (existingSessions.length > 0) {
+        const primarySession = existingSessions[0];
 
-    await db.insert(activeSessions).values(insertData);
-    return { sessionId: insertData.sessionId };
+        await tx
+          .update(activeSessions)
+          .set({
+            lastActivity: new Date(),
+          })
+          .where(eq(activeSessions.sessionId, primarySession.sessionId));
+
+        // Heal any pre-existing duplicates so events stop bouncing between session IDs.
+        if (existingSessions.length > 1) {
+          const duplicateSessionIds = existingSessions.slice(1).map(s => s.sessionId);
+          await tx.delete(activeSessions).where(inArray(activeSessions.sessionId, duplicateSessionIds));
+          this.logger.warn(
+            { siteId, userId, duplicateCount: duplicateSessionIds.length },
+            "Removed duplicate active sessions for user"
+          );
+        }
+
+        return { sessionId: primarySession.sessionId };
+      }
+
+      const insertData = {
+        sessionId: nanoid(14),
+        siteId,
+        userId,
+        startTime: new Date(),
+        lastActivity: new Date(),
+      };
+
+      await tx.insert(activeSessions).values(insertData);
+      return { sessionId: insertData.sessionId };
+    });
   }
 
   async cleanupOldSessions(): Promise<number> {
