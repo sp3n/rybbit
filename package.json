@@ -1,0 +1,11 @@
+{
+  "name": "rybbit-dev-tools",
+  "private": true,
+  "scripts": {
+    "dev:start": "powershell -NoProfile -ExecutionPolicy Bypass -File ./dev.ps1",
+    "dev:install": "powershell -NoProfile -ExecutionPolicy Bypass -File ./dev.ps1 -Install",
+    "dev:prep": "powershell -NoProfile -ExecutionPolicy Bypass -File ./dev.ps1 -NoWindows",
+    "dev:prep:install": "powershell -NoProfile -ExecutionPolicy Bypass -File ./dev.ps1 -Install -NoWindows",
+    "dev:skip-db": "powershell -NoProfile -ExecutionPolicy Bypass -File ./dev.ps1 -SkipDbPush"
+  }
+}
