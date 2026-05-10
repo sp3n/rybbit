@@ -39,6 +39,7 @@ import { useGetSite, useSiteHasData } from "../../../../api/admin/hooks/useSites
 import { CodeSnippet } from "../../../../components/CodeSnippet";
 import { ExternalLink } from "../../../../components/ExternalLink";
 import { Alert } from "../../../../components/ui/alert";
+import { buildTrackingScriptSnippet } from "../../../../lib/trackingScriptSnippet";
 import { useStore } from "../../../../lib/store";
 
 // Custom Card Component
@@ -84,23 +85,22 @@ export function NoData() {
                 <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-green-400 opacity-75"></span>
                 <span className="relative inline-flex h-3 w-3 rounded-full bg-green-500"></span>
               </span>
-              <div className="font-medium">{t("Waiting for analytics from {name}...", { name: siteMetadata?.name ?? "" })}</div>
+              <div className="font-medium">
+                {t("Waiting for analytics from {name}...", { name: siteMetadata?.name ?? "" })}
+              </div>
             </div>
-            <div className="text-xs text-muted-foreground">{t("Place this snippet in the {headTag} of your website:", { headTag: "<head>" })}</div>
+            <div className="text-xs text-muted-foreground">
+              {t("Place this snippet in the {headTag} of your website:", { headTag: "<head>" })}
+            </div>
             <CodeSnippet
               language="HTML"
-              code={`<script\n    src="${globalThis.location.origin}/api/script.js"\n    data-site-id="${siteMetadata?.id ?? siteMetadata?.siteId}"\n    defer\n></script>`}
+              code={siteMetadata ? buildTrackingScriptSnippet(siteMetadata) : ""}
               className="text-xs"
             />
             <span className="text-xs text-muted-foreground">
-              {t("See our")}{" "}
-              <ExternalLink href="https://rybbit.com/docs/script">
-                {t("docs")}
-              </ExternalLink>{" "}
+              {t("See our")} <ExternalLink href="https://rybbit.com/docs/script">{t("docs")}</ExternalLink>{" "}
               {t("for more information, or")}{" "}
-              <ExternalLink href="https://rybbit.com/docs/script-troubleshooting">
-                {t("troubleshoot")}
-              </ExternalLink>{" "}
+              <ExternalLink href="https://rybbit.com/docs/script-troubleshooting">{t("troubleshoot")}</ExternalLink>{" "}
               {t("if your script isn't sending traffic.")}
             </span>
             {/* {siteMetadata?.siteId && <VerifyInstallation siteId={siteMetadata.siteId} />} */}

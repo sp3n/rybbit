@@ -84,6 +84,10 @@
       return null;
     }
     const namespace = scriptTag.getAttribute("data-namespace") || "rybbit";
+    const parseBooleanAttribute = (name, defaultValue) => {
+      const value = scriptTag.getAttribute(name);
+      return value === null ? defaultValue : value !== "false";
+    };
     const skipPatterns = parseJsonSafely(scriptTag.getAttribute("data-skip-patterns"), []);
     const maskPatterns = parseJsonSafely(scriptTag.getAttribute("data-mask-patterns"), []);
     const sessionReplayMaskTextSelectors = parseJsonSafely(
@@ -111,7 +115,7 @@
     const sampleRateAttr = scriptTag.getAttribute("data-replay-sample-rate");
     const sessionReplaySampleRate = sampleRateAttr ? Math.min(100, Math.max(0, parseInt(sampleRateAttr, 10))) : void 0;
     const tag = scriptTag.getAttribute("data-tag") || "";
-    const defaultConfig = {
+    return {
       namespace,
       analyticsHost,
       siteId,
@@ -121,17 +125,16 @@
       sessionReplayMaskTextSelectors,
       skipPatterns,
       maskPatterns,
-      // Default all tracking to true initially (will be updated from API)
-      autoTrackPageview: true,
-      autoTrackSpa: true,
-      trackQuerystring: true,
-      trackOutbound: true,
-      enableWebVitals: false,
-      trackErrors: false,
-      enableSessionReplay: false,
-      trackButtonClicks: false,
-      trackCopy: false,
-      trackFormInteractions: false,
+      autoTrackPageview: parseBooleanAttribute("data-track-initial-pageview", true),
+      autoTrackSpa: parseBooleanAttribute("data-track-spa-navigation", true),
+      trackQuerystring: parseBooleanAttribute("data-track-url-params", true),
+      trackOutbound: parseBooleanAttribute("data-track-outbound", true),
+      enableWebVitals: parseBooleanAttribute("data-web-vitals", false),
+      trackErrors: parseBooleanAttribute("data-track-errors", false),
+      enableSessionReplay: parseBooleanAttribute("data-session-replay", false),
+      trackButtonClicks: parseBooleanAttribute("data-track-button-clicks", false),
+      trackCopy: parseBooleanAttribute("data-track-copy", false),
+      trackFormInteractions: parseBooleanAttribute("data-track-form-interactions", false),
       tag,
       // rrweb session replay options (undefined means use rrweb defaults)
       sessionReplayBlockClass,
@@ -146,37 +149,6 @@
       sessionReplaySlimDOMOptions,
       sessionReplaySampleRate
     };
-    try {
-      const configUrl = `${analyticsHost}/site/tracking-config/${siteId}`;
-      const response = await fetch(configUrl, {
-        method: "GET",
-        // Include credentials if needed for authentication
-        credentials: "omit"
-      });
-      if (response.ok) {
-        const apiConfig = await response.json();
-        return {
-          ...defaultConfig,
-          // Map API field names to script config field names
-          autoTrackPageview: apiConfig.trackInitialPageView ?? defaultConfig.autoTrackPageview,
-          autoTrackSpa: apiConfig.trackSpaNavigation ?? defaultConfig.autoTrackSpa,
-          trackQuerystring: apiConfig.trackUrlParams ?? defaultConfig.trackQuerystring,
-          trackOutbound: apiConfig.trackOutbound ?? defaultConfig.trackOutbound,
-          enableWebVitals: apiConfig.webVitals ?? defaultConfig.enableWebVitals,
-          trackErrors: apiConfig.trackErrors ?? defaultConfig.trackErrors,
-          enableSessionReplay: apiConfig.sessionReplay ?? defaultConfig.enableSessionReplay,
-          trackButtonClicks: apiConfig.trackButtonClicks ?? defaultConfig.trackButtonClicks,
-          trackCopy: apiConfig.trackCopy ?? defaultConfig.trackCopy,
-          trackFormInteractions: apiConfig.trackFormInteractions ?? defaultConfig.trackFormInteractions
-        };
-      } else {
-        console.warn("Failed to fetch tracking config from API, using defaults");
-        return defaultConfig;
-      }
-    } catch (error) {
-      console.warn("Error fetching tracking config:", error);
-      return defaultConfig;
-    }
   }
 
   // sessionReplay.ts
@@ -817,13 +789,11 @@
         }));
       }));
     }
-    return {
-      get firstHiddenTime() {
-        return u;
-      }, onHidden(e2) {
-        l.add(e2);
-      }
-    };
+    return { get firstHiddenTime() {
+      return u;
+    }, onHidden(e2) {
+      l.add(e2);
+    } };
   };
   var g = (e2) => {
     document.prerendering ? addEventListener("prerenderingchange", (() => e2()), true) : e2();
@@ -1212,7 +1182,7 @@
   };
 
   // index.ts
-  (async function () {
+  (async function() {
     const scriptTag = document.currentScript;
     if (!scriptTag) {
       console.error("Could not find current script tag");
@@ -1306,7 +1276,7 @@
     const trackPageview = () => tracker.trackPageview();
     const debouncedTrackPageview = config.debounceDuration > 0 ? debounce(trackPageview, config.debounceDuration) : trackPageview;
     function setupEventListeners() {
-      document.addEventListener("click", function (e2) {
+      document.addEventListener("click", function(e2) {
         let target = e2.target;
         while (target && target !== document.documentElement) {
           if (target.hasAttribute("data-rybbit-event")) {
@@ -1335,12 +1305,12 @@
       if (config.autoTrackSpa) {
         const originalPushState = history.pushState;
         const originalReplaceState = history.replaceState;
-        history.pushState = function (...args) {
+        history.pushState = function(...args) {
           originalPushState.apply(this, args);
           debouncedTrackPageview();
           tracker.onPageChange();
         };
-        history.replaceState = function (...args) {
+        history.replaceState = function(...args) {
           originalReplaceState.apply(this, args);
           debouncedTrackPageview();
           tracker.onPageChange();

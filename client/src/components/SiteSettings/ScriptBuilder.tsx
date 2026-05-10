@@ -5,14 +5,16 @@ import { VerifyInstallation } from "@/components/VerifyInstallation";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import { buildTrackingScriptSnippet } from "@/lib/trackingScriptSnippet";
 import { useExtracted } from "next-intl";
 import { useState } from "react";
+import type { SiteResponse } from "@/api/admin/endpoints";
 
 interface ScriptBuilderProps {
-  siteId: string;
+  siteMetadata: SiteResponse;
 }
 
-export function ScriptBuilder({ siteId }: ScriptBuilderProps) {
+export function ScriptBuilder({ siteMetadata }: ScriptBuilderProps) {
   const t = useExtracted();
   const [debounceValue, setDebounceValue] = useState(500);
   const [skipPatterns, setSkipPatterns] = useState<string[]>([]);
@@ -74,23 +76,11 @@ export function ScriptBuilder({ siteId }: ScriptBuilderProps) {
   };
 
   // Generate tracking script dynamically based on options
-  const trackingScript = `<script
-    src="${globalThis.location.origin}/api/script.js"
-    data-site-id="${siteId}"${debounceValue !== 500
-      ? `
-    data-debounce="${debounceValue}"`
-      : ""
-    }${skipPatterns.length > 0
-      ? `
-    data-skip-patterns='${JSON.stringify(skipPatterns)}'`
-      : ""
-    }${maskPatterns.length > 0
-      ? `
-    data-mask-patterns='${JSON.stringify(maskPatterns)}'`
-      : ""
-    }
-    defer
-></script>`;
+  const trackingScript = buildTrackingScriptSnippet(siteMetadata, {
+    debounceValue,
+    skipPatterns,
+    maskPatterns,
+  });
 
   return (
     <div className="space-y-6">
@@ -103,7 +93,7 @@ export function ScriptBuilder({ siteId }: ScriptBuilderProps) {
         </div>
         <CodeSnippet language="HTML" code={trackingScript} />
 
-        <VerifyInstallation siteId={siteId} />
+        <VerifyInstallation siteId={siteMetadata.id ?? String(siteMetadata.siteId)} />
 
         {/* Script Options Section */}
         <div className="space-y-4">
@@ -113,7 +103,9 @@ export function ScriptBuilder({ siteId }: ScriptBuilderProps) {
               <Label htmlFor="skipPatterns" className="text-sm font-medium text-foreground block">
                 {t("Skip Patterns")}
               </Label>
-              <p className="text-xs text-muted-foreground mt-1">{t("URL patterns to exclude from tracking (one per line)")}</p>
+              <p className="text-xs text-muted-foreground mt-1">
+                {t("URL patterns to exclude from tracking (one per line)")}
+              </p>
               <p className="text-xs text-muted-foreground mt-1">
                 {t("Use * for single segment wildcard, ** for multi-segment wildcard")}
               </p>
@@ -168,7 +160,9 @@ export function ScriptBuilder({ siteId }: ScriptBuilderProps) {
                 <span className="text-xs text-muted-foreground">{t("Default: 500ms")}</span>
               </div>
             </div>
-            <p className="text-xs text-muted-foreground">{t("Time to wait before tracking a pageview after URL changes")}</p>
+            <p className="text-xs text-muted-foreground">
+              {t("Time to wait before tracking a pageview after URL changes")}
+            </p>
           </div>
         </div>
       </div>
