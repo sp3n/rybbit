@@ -25,6 +25,7 @@ import {
   getEventBucketed,
   getEventNames,
   getEventProperties,
+  getEventPropertyMetric,
   getEvents,
 
   getFunnel,
@@ -273,6 +274,7 @@ async function analyticsRoutes(fastify: FastifyInstance) {
   fastify.delete("/sites/:siteId/goals/:goalId", authSite, deleteGoal);
   fastify.put("/sites/:siteId/goals/:goalId", authSite, updateGoal);
   fastify.get("/sites/:siteId/events/names", publicSite, getEventNames);
+  fastify.get("/sites/:siteId/events/properties/metric", publicSite, getEventPropertyMetric);
   fastify.get("/sites/:siteId/events/properties", publicSite, getEventProperties);
   fastify.get("/sites/:siteId/events/outbound", publicSite, getOutboundLinks);
   fastify.get("/org-event-count/:organizationId", orgMember, getOrgEventCount);
