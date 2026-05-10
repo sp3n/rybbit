@@ -30,6 +30,7 @@ pnpm-debug.log*
 # Docker volumes
 docker-volumes/
 clickhouse-data/
+backups/
 
 # Testing
 coverage/
