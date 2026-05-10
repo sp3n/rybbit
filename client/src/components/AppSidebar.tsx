@@ -3,6 +3,7 @@
 import { BookOpen, Building2, HelpCircle, LogOut, Settings, ShieldUser, User } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useExtracted } from "next-intl";
 import { Suspense, useState } from "react";
 import { useEmbedablePage } from "../app/[site]/utils";
 import { useAdminPermission } from "../app/admin/hooks/useAdminPermission";
@@ -17,13 +18,14 @@ import { ThemeSwitcher } from "./ThemeSwitcher";
 function AdminLink({ isExpanded }: { isExpanded: boolean }) {
   const pathname = usePathname();
   const { isAdmin } = useAdminPermission();
+  const t = useExtracted();
   if (!IS_CLOUD || !isAdmin) return null;
 
   return (
     <SidebarLink
       href="/admin"
       icon={<ShieldUser className="w-5 h-5" />}
-      label="Admin"
+      label={t("Admin")}
       active={pathname.startsWith("/admin")}
       expanded={isExpanded}
     />
@@ -36,6 +38,7 @@ function AppSidebarContent() {
   const [isExpanded, setIsExpanded] = useState(false);
   const embed = useEmbedablePage();
   const signout = useSignout();
+  const t = useExtracted();
 
   const { data: subscription } = useStripeSubscription();
 
@@ -57,28 +60,21 @@ function AppSidebarContent() {
         <SidebarLink
           href="https://rybbit.com/docs"
           icon={<BookOpen className="w-5 h-5" />}
-          label="Documentation"
+          label={t("Documentation")}
           target="_blank"
           active={false}
           expanded={isExpanded}
         />
         {
-          IS_CLOUD && subscription?.status === "active" && <SidebarLink
+          IS_CLOUD && (subscription?.status === "active" || subscription?.status === "trialing") && <SidebarLink
             href="mailto:hello@rybbit.com"
             icon={<HelpCircle className="w-5 h-5" />}
-            label="Email Support"
+            label={t("Email Support")}
             target="_blank"
             active={false}
             expanded={isExpanded}
           />
         }
-        {/* <SidebarLink
-          href="/uptime/monitors"
-          icon={<SquareActivity className="w-5 h-5" />}
-          label="Uptime"
-          active={pathname.startsWith("/uptime")}
-          expanded={isExpanded}
-        /> */}
         {session?.user.role === "admin" && <AdminLink isExpanded={isExpanded} />}
       </div>
       <div className="flex flex-col items-start gap-2 w-full">
@@ -91,21 +87,21 @@ function AppSidebarContent() {
             <SidebarLink
               href="/settings/account"
               icon={<User className="w-5 h-5" />}
-              label="Account"
+              label={t("Account")}
               active={pathname.startsWith("/settings/account")}
               expanded={isExpanded}
             />
             <SidebarLink
               href="/settings/organization"
               icon={<Building2 className="w-5 h-5" />}
-              label="Organization"
+              label={t("Organization")}
               active={pathname.startsWith("/settings/organization")}
               expanded={isExpanded}
             />
             <SidebarLink
               onClick={signout}
               icon={<LogOut className="w-5 h-5" />}
-              label="Sign out"
+              label={t("Sign out")}
               expanded={isExpanded}
             />
           </>

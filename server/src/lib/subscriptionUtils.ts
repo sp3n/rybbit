@@ -30,6 +30,7 @@ export interface StripeSubscriptionInfo {
   interval: string;
   cancelAtPeriodEnd: boolean;
   createdAt: Date;
+  trialEnd?: Date;
 }
 
 export interface FreeSubscriptionInfo {
@@ -51,11 +52,24 @@ export interface OverrideSubscriptionInfo {
   cancelAtPeriodEnd: false;
 }
 
+export interface CustomPlanSubscriptionInfo {
+  source: "custom";
+  planName: "custom";
+  eventLimit: number;
+  memberLimit: number | null; // null = unlimited
+  siteLimit: number | null; // null = unlimited
+  periodStart: string;
+  status: "active";
+  interval: "lifetime";
+  cancelAtPeriodEnd: false;
+}
+
 export type SubscriptionInfo =
   | AppSumoSubscriptionInfo
   | StripeSubscriptionInfo
   | FreeSubscriptionInfo
-  | OverrideSubscriptionInfo;
+  | OverrideSubscriptionInfo
+  | CustomPlanSubscriptionInfo;
 
 /**
  * Gets the first day of the current month in YYYY-MM-DD format
@@ -167,18 +181,30 @@ export async function getStripeSubscription(stripeCustomerId: string | null): Pr
   }
 
   try {
-    const subscriptions = await (stripe as Stripe).subscriptions.list({
-      customer: stripeCustomerId,
-      status: "active",
-      limit: 1,
-      expand: ["data.plan.product"],
-    });
+    // Fetch both active and trialing subscriptions in parallel
+    const [activeSubs, trialSubs] = await Promise.all([
+      (stripe as Stripe).subscriptions.list({
+        customer: stripeCustomerId,
+        status: "active",
+        expand: ["data.plan.product"],
+      }),
+      (stripe as Stripe).subscriptions.list({
+        customer: stripeCustomerId,
+        status: "trialing",
+        expand: ["data.plan.product"],
+      }),
+    ]);
 
-    if (subscriptions.data.length === 0) {
+    const allSubs = [...activeSubs.data, ...trialSubs.data];
+
+    if (allSubs.length === 0) {
       return null;
     }
 
-    const subscription = subscriptions.data[0];
+    // Pick the most recently created subscription across both active and trialing
+    const subscription = allSubs.sort((a, b) => b.created - a.created)[0];
+    const isTrial = subscription.status === "trialing";
+
     const subscriptionItem = subscription.items.data[0];
     const priceId = subscriptionItem.price.id;
 
@@ -205,6 +231,7 @@ export async function getStripeSubscription(stripeCustomerId: string | null): Pr
         interval: subscriptionItem.price.recurring?.interval ?? "unknown",
         cancelAtPeriodEnd: subscription.cancel_at_period_end,
         createdAt: new Date(subscription.created * 1000),
+        ...(isTrial && subscription.trial_end ? { trialEnd: new Date(subscription.trial_end * 1000) } : {}),
       };
     }
 
@@ -228,6 +255,7 @@ export async function getStripeSubscription(stripeCustomerId: string | null): Pr
       interval: subscriptionItem.price.recurring?.interval ?? "unknown",
       cancelAtPeriodEnd: subscription.cancel_at_period_end,
       createdAt: new Date(subscription.created * 1000),
+      ...(isTrial && subscription.trial_end ? { trialEnd: new Date(subscription.trial_end * 1000) } : {}),
     };
   } catch (error) {
     console.error("Error fetching Stripe subscription:", error);
@@ -236,15 +264,57 @@ export async function getStripeSubscription(stripeCustomerId: string | null): Pr
 }
 
 /**
+ * Gets custom plan subscription info for an organization
+ * @returns Custom plan subscription info or null if no custom plan set
+ */
+export async function getCustomPlanSubscription(organizationId: string): Promise<CustomPlanSubscriptionInfo | null> {
+  try {
+    const orgResult = await db
+      .select({ customPlan: organization.customPlan })
+      .from(organization)
+      .where(eq(organization.id, organizationId))
+      .limit(1);
+
+    const org = orgResult[0];
+    if (!org?.customPlan) {
+      return null;
+    }
+
+    const cp = org.customPlan;
+
+    return {
+      source: "custom",
+      planName: "custom",
+      eventLimit: cp.events,
+      memberLimit: cp.members ?? null,
+      siteLimit: cp.websites ?? null,
+      periodStart: getStartOfMonth(),
+      status: "active",
+      interval: "lifetime",
+      cancelAtPeriodEnd: false,
+    };
+  } catch (error) {
+    console.error("Error checking custom plan:", error);
+    return null;
+  }
+}
+
+/**
  * Gets the best subscription for an organization
- * Priority: Override > AppSumo/Stripe (highest limit) > Free
+ * Priority: CustomPlan > Override > AppSumo/Stripe (highest limit) > Free
  * @returns The active subscription, or free tier if none found
  */
 export async function getBestSubscription(
   organizationId: string,
   stripeCustomerId: string | null
 ): Promise<SubscriptionInfo> {
-  // Check override first - always wins
+  // Check custom plan first - highest priority
+  const customSub = await getCustomPlanSubscription(organizationId);
+  if (customSub) {
+    return customSub;
+  }
+
+  // Check override next
   const overrideSub = await getOverrideSubscription(organizationId);
   if (overrideSub) {
     return overrideSub;
@@ -256,13 +326,13 @@ export async function getBestSubscription(
     getStripeSubscription(stripeCustomerId),
   ]);
 
-  // If we have both, return the one with higher event limit
-  if (appsumoSub && stripeSub) {
-    const bestSub = appsumoSub.eventLimit >= stripeSub.eventLimit ? appsumoSub : stripeSub;
-    logger.info(
-      `Organization has both AppSumo (${appsumoSub.eventLimit} events) and Stripe (${stripeSub.eventLimit} events). Using ${bestSub.source} with ${bestSub.eventLimit} events.`
-    );
-    return bestSub;
+
+  if (stripeSub) {
+    return stripeSub;
+  }
+
+  if (appsumoSub) {
+    return appsumoSub;
   }
 
   // Return whichever one exists

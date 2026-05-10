@@ -1,5 +1,4 @@
 "use client";
-import { TimeBucket } from "@rybbit/shared";
 import { useNivoTheme } from "@/lib/nivo";
 import { StatType, useStore } from "@/lib/store";
 import { LineCustomSvgLayer, LineCustomSvgLayerProps, LineSeries, ResponsiveLine } from "@nivo/line";
@@ -7,105 +6,11 @@ import { useWindowSize } from "@uidotdev/usehooks";
 import { DateTime } from "luxon";
 import { GetOverviewBucketedResponse } from "../../../../../api/analytics/endpoints";
 import { APIResponse } from "../../../../../api/types";
-import { Time } from "../../../../../components/DateSelector/types";
 import { formatSecondsAsMinutesAndSeconds, formatter } from "../../../../../lib/utils";
 import { userLocale, hour12, formatChartDateTime } from "../../../../../lib/dateTimeUtils";
 import { getTimezone } from "../../../../../lib/store";
 import { ChartTooltip } from "../../../../../components/charts/ChartTooltip";
-
-const getMax = (time: Time, bucket: TimeBucket, timezone: string) => {
-  if (time.mode === "past-minutes") {
-    if (bucket === "hour") {
-      return DateTime.now().setZone(timezone).startOf("hour").toJSDate();
-    }
-    return undefined;
-  } else if (time.mode === "day") {
-    const dayDate = DateTime.fromISO(time.day, { zone: timezone })
-      .endOf("day")
-      .minus({
-        minutes:
-          bucket === "hour"
-            ? 59
-            : bucket === "fifteen_minutes"
-              ? 14
-              : bucket === "ten_minutes"
-                ? 9
-                : bucket === "five_minutes"
-                  ? 4
-                  : 0,
-      });
-    return dayDate.toJSDate();
-  } else if (time.mode === "range") {
-    if (bucket === "day" || bucket === "week" || bucket === "month" || bucket === "year") {
-      return undefined;
-    }
-    const rangeDate = DateTime.fromISO(time.endDate, { zone: timezone })
-      .endOf("day")
-      .minus({
-        minutes:
-          bucket === "hour"
-            ? 59
-            : bucket === "fifteen_minutes"
-              ? 14
-              : bucket === "ten_minutes"
-                ? 9
-                : bucket === "five_minutes"
-                  ? 4
-                  : 0,
-      });
-    return rangeDate.toJSDate();
-  } else if (time.mode === "week") {
-    if (bucket === "hour") {
-      const endDate = DateTime.fromISO(time.week, { zone: timezone }).endOf("week").minus({
-        minutes: 59,
-      });
-      return endDate.toJSDate();
-    }
-    if (bucket === "fifteen_minutes") {
-      const endDate = DateTime.fromISO(time.week, { zone: timezone }).endOf("week").minus({
-        minutes: 14,
-      });
-      return endDate.toJSDate();
-    }
-    return undefined;
-  } else if (time.mode === "month") {
-    if (bucket === "hour") {
-      const endDate = DateTime.fromISO(time.month, { zone: timezone }).endOf("month").minus({
-        minutes: 59,
-      });
-      return endDate.toJSDate();
-    }
-    const monthDate = DateTime.fromISO(time.month, { zone: timezone }).endOf("month");
-    return monthDate.toJSDate();
-  } else if (time.mode === "year") {
-    const yearDate = DateTime.fromISO(time.year, { zone: timezone }).endOf("year");
-    return yearDate.toJSDate();
-  }
-  return undefined;
-};
-
-const getMin = (time: Time, bucket: TimeBucket, timezone: string) => {
-  if (time.mode === "past-minutes") {
-    return DateTime.now()
-      .setZone(timezone)
-      .minus({ minutes: time.pastMinutesStart })
-      .startOf(time.pastMinutesStart < 360 ? "minute" : "hour")
-      .toJSDate();
-  } else if (time.mode === "day") {
-    const dayDate = DateTime.fromISO(time.day, { zone: timezone }).startOf("day");
-    return dayDate.toJSDate();
-  } else if (time.mode === "week") {
-    const weekDate = DateTime.fromISO(time.week, { zone: timezone }).startOf("week");
-    return weekDate.toJSDate();
-  } else if (time.mode === "month") {
-    const monthDate = DateTime.fromISO(time.month, { zone: timezone }).startOf("month");
-    return monthDate.toJSDate();
-  } else if (time.mode === "year") {
-    const yearDate = DateTime.fromISO(time.year, { zone: timezone }).startOf("year");
-    return yearDate.toJSDate();
-  }
-  return undefined;
-};
+import { getChartTimeBounds } from "./chartTimeBounds";
 
 const formatTooltipValue = (value: number, selectedStat: StatType): string => {
   if (selectedStat === "bounce_rate") {
@@ -123,25 +28,30 @@ export function Chart({
   data,
   previousData,
   max,
+  chartXMax,
 }: {
   data: APIResponse<GetOverviewBucketedResponse> | undefined;
   previousData: APIResponse<GetOverviewBucketedResponse> | undefined;
   max: number;
+  chartXMax: Date | undefined;
 }) {
   const { time, bucket, selectedStat } = useStore();
   const { width } = useWindowSize();
   const nivoTheme = useNivoTheme();
   const timezone = getTimezone();
 
-  const chartMin = getMin(time, bucket, timezone);
-  const chartMax = getMax(time, bucket, timezone);
+  const { min: chartMin, max: boundsMax } = getChartTimeBounds(time, bucket, timezone);
+  // Prefer the actual last-current-bucket so the line reaches the right edge;
+  // fall back to the period boundary when there's no current data.
+  const chartMax = chartXMax ?? boundsMax;
 
   const maxTicks = Math.round((width ?? Infinity) / 75);
 
-  // When the current period has more datapoints than the previous period,
-  // we need to shift the previous datapoints to the right by the difference in length
-  const lengthDiff = Math.max((data?.data?.length ?? 0) - (previousData?.data?.length ?? 0), 0);
-
+  // Pair current and previous datapoints by index from the START of each
+  // period (Mar 1 ↔ Feb 1, Mar 2 ↔ Feb 2, …). If the current period has more
+  // datapoints than the previous (e.g. March 31d vs Feb 28d), the trailing
+  // current days have no previous twin — matches PreviousChart's overlay,
+  // which shifts previous data onto the current period's x-axis.
   const formattedData =
     data?.data
       ?.map((e, i) => {
@@ -153,13 +63,16 @@ export function Chart({
           return null;
         }
 
+        const prevPoint = previousData?.data?.[i];
+
         return {
           x: timestamp.toFormat("yyyy-MM-dd HH:mm:ss"),
           y: e[selectedStat],
-          previousY: i >= lengthDiff && previousData?.data?.[i - lengthDiff][selectedStat],
+          previousY: prevPoint ? prevPoint[selectedStat] : false,
           currentTime: timestamp,
-          previousTime:
-            i >= lengthDiff ? DateTime.fromSQL(previousData?.data?.[i - lengthDiff]?.time ?? "", { zone: timezone }).toUTC() : undefined,
+          previousTime: prevPoint
+            ? DateTime.fromSQL(prevPoint.time, { zone: timezone }).toUTC()
+            : undefined,
         };
       })
       .filter(e => e !== null) || [];

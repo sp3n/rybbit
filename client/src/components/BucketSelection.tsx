@@ -3,158 +3,162 @@
 import { useStore } from "@/lib/store";
 import { SelectItem, Select, SelectContent, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { DateTime } from "luxon";
+import { useExtracted } from "next-intl";
 import { Time } from "./DateSelector/types";
 import { TimerReset } from "lucide-react";
 
-const getOptions = (time: Time) => {
-  if (time.mode === "past-minutes") {
-    if (time.pastMinutesStart >= 1440) {
+export function BucketSelection() {
+  const t = useExtracted();
+  const { bucket, setBucket, time } = useStore();
+
+  const getOptions = (time: Time) => {
+    if (time.mode === "past-minutes") {
+      const timeDiff = time.pastMinutesStart - (time.pastMinutesEnd ?? 0);
+
+      if (time.pastMinutesStart >= 1440) {
+        return (
+          <SelectContent>
+            <SelectItem size="sm" value="minute">
+              {t("Min")}
+            </SelectItem>
+            <SelectItem size="sm" value="five_minutes">
+              {t("5 Min")}
+            </SelectItem>
+            <SelectItem size="sm" value="fifteen_minutes">
+              {t("15 Min")}
+            </SelectItem>
+            <SelectItem size="sm" value="hour">
+              {t("Hour")}
+            </SelectItem>
+          </SelectContent>
+        );
+      }
+      if (timeDiff > 120) {
+        return (
+          <SelectContent>
+            <SelectItem size="sm" value="hour">
+              {t("Hour")}
+            </SelectItem>
+          </SelectContent>
+        );
+      }
+      // For shorter durations, exclude hour buckets
       return (
         <SelectContent>
           <SelectItem size="sm" value="minute">
-            Min
-          </SelectItem>
-          <SelectItem size="sm" value="five_minutes">
-            5 Min
-          </SelectItem>
-          <SelectItem size="sm" value="fifteen_minutes">
-            15 Min
-          </SelectItem>
-          <SelectItem size="sm" value="hour">
-            Hour
+            {t("Min")}
           </SelectItem>
         </SelectContent>
       );
     }
-    if (time.pastMinutesStart >= 360) {
+    if (time.mode === "day") {
+      return (
+        <SelectContent>
+          <SelectItem size="sm" value="minute">
+            {t("Min")}
+          </SelectItem>
+          <SelectItem size="sm" value="five_minutes">
+            {t("5 Min")}
+          </SelectItem>
+          <SelectItem size="sm" value="fifteen_minutes">
+            {t("15 Min")}
+          </SelectItem>
+          <SelectItem size="sm" value="hour">
+            {t("Hour")}
+          </SelectItem>
+        </SelectContent>
+      );
+    }
+    if (time.mode === "week") {
+      return (
+        <SelectContent>
+          <SelectItem size="sm" value="fifteen_minutes">
+            {t("15 Min")}
+          </SelectItem>
+          <SelectItem size="sm" value="hour">
+            {t("Hour")}
+          </SelectItem>
+          <SelectItem size="sm" value="day">
+            {t("Day")}
+          </SelectItem>
+        </SelectContent>
+      );
+    }
+    if (time.mode === "month") {
       return (
         <SelectContent>
           <SelectItem size="sm" value="hour">
-            Hour
+            {t("Hour")}
+          </SelectItem>
+          <SelectItem size="sm" value="day">
+            {t("Day")}
+          </SelectItem>
+          <SelectItem size="sm" value="week">
+            {t("Week")}
           </SelectItem>
         </SelectContent>
       );
     }
-    // For shorter durations, exclude hour buckets
-    return (
-      <SelectContent>
-        <SelectItem size="sm" value="minute">
-          Min
-        </SelectItem>
-      </SelectContent>
-    );
-  }
-  if (time.mode === "day") {
-    return (
-      <SelectContent>
-        <SelectItem size="sm" value="minute">
-          Min
-        </SelectItem>
-        <SelectItem size="sm" value="five_minutes">
-          5 Min
-        </SelectItem>
-        <SelectItem size="sm" value="fifteen_minutes">
-          15 Min
-        </SelectItem>
-        <SelectItem size="sm" value="hour">
-          Hour
-        </SelectItem>
-      </SelectContent>
-    );
-  }
-  if (time.mode === "week") {
-    return (
-      <SelectContent>
-        <SelectItem size="sm" value="fifteen_minutes">
-          15 Min
-        </SelectItem>
-        <SelectItem size="sm" value="hour">
-          Hour
-        </SelectItem>
-        <SelectItem size="sm" value="day">
-          Day
-        </SelectItem>
-      </SelectContent>
-    );
-  }
-  if (time.mode === "month") {
-    return (
-      <SelectContent>
-        <SelectItem size="sm" value="hour">
-          Hour
-        </SelectItem>
-        <SelectItem size="sm" value="day">
-          Day
-        </SelectItem>
-        <SelectItem size="sm" value="week">
-          Week
-        </SelectItem>
-      </SelectContent>
-    );
-  }
-  if (time.mode === "year" || time.mode === "all-time") {
-    return (
-      <SelectContent>
-        <SelectItem size="sm" value="day">
-          Day
-        </SelectItem>
-        <SelectItem size="sm" value="week">
-          Week
-        </SelectItem>
-        <SelectItem size="sm" value="month">
-          Month
-        </SelectItem>
-      </SelectContent>
-    );
-  }
-
-  if (time.mode === "range") {
-    const timeRangeLength = DateTime.fromISO(time.endDate).diff(DateTime.fromISO(time.startDate), "days").days;
-
-    return (
-      <SelectContent>
-        {timeRangeLength <= 7 && (
-          <SelectItem size="sm" value="five_minutes">
-            5 Min
-          </SelectItem>
-        )}
-        {timeRangeLength <= 14 && (
-          <>
-            <SelectItem size="sm" value="ten_minutes">
-              10 Min
-            </SelectItem>
-            <SelectItem size="sm" value="fifteen_minutes">
-              15 Min
-            </SelectItem>
-          </>
-        )}
-        {timeRangeLength <= 30 && (
-          <SelectItem size="sm" value="hour">
-            Hour
-          </SelectItem>
-        )}
-        {timeRangeLength > 1 && (
+    if (time.mode === "year" || time.mode === "all-time") {
+      return (
+        <SelectContent>
           <SelectItem size="sm" value="day">
-            Day
+            {t("Day")}
           </SelectItem>
-        )}
-        {timeRangeLength >= 28 && (
           <SelectItem size="sm" value="week">
-            Week
+            {t("Week")}
           </SelectItem>
-        )}
-        {timeRangeLength >= 60 && (
           <SelectItem size="sm" value="month">
-            Month
+            {t("Month")}
           </SelectItem>
-        )}
-      </SelectContent>
-    );
-  }
-};
+        </SelectContent>
+      );
+    }
 
-export function BucketSelection() {
-  const { bucket, setBucket, time } = useStore();
+    if (time.mode === "range") {
+      const timeRangeLength = DateTime.fromISO(time.endDate).diff(DateTime.fromISO(time.startDate), "days").days + 1;
+
+      return (
+        <SelectContent>
+          {timeRangeLength <= 7 && (
+            <SelectItem size="sm" value="five_minutes">
+              {t("5 Min")}
+            </SelectItem>
+          )}
+          {timeRangeLength <= 14 && (
+            <>
+              <SelectItem size="sm" value="ten_minutes">
+                {t("10 Min")}
+              </SelectItem>
+              <SelectItem size="sm" value="fifteen_minutes">
+                {t("15 Min")}
+              </SelectItem>
+            </>
+          )}
+          {timeRangeLength <= 30 && (
+            <SelectItem size="sm" value="hour">
+              {t("Hour")}
+            </SelectItem>
+          )}
+          {timeRangeLength >= 1 && (
+            <SelectItem size="sm" value="day">
+              {t("Day")}
+            </SelectItem>
+          )}
+          {timeRangeLength >= 28 && (
+            <SelectItem size="sm" value="week">
+              {t("Week")}
+            </SelectItem>
+          )}
+          {timeRangeLength >= 60 && (
+            <SelectItem size="sm" value="month">
+              {t("Month")}
+            </SelectItem>
+          )}
+        </SelectContent>
+      );
+    }
+  };
 
   return (
     <Select value={bucket} onValueChange={setBucket}>

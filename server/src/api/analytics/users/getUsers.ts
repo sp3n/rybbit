@@ -119,13 +119,14 @@ WITH AggregatedUsers AS (
         argMax(screen_width, timestamp) AS screen_width,
         argMax(screen_height, timestamp) AS screen_height,
         argMin(referrer, timestamp) AS referrer,
-        argMax(channel, timestamp) AS channel,
+        argMin(channel, timestamp) AS channel,
         argMin(hostname, timestamp) AS hostname,
         countIf(type = 'pageview') AS pageviews,
         countIf(type = 'custom_event') AS events,
         count(distinct session_id) AS sessions,
         max(timestamp) AS last_seen,
-        min(timestamp) AS first_seen
+        min(timestamp) AS first_seen,
+        argMax(tag, timestamp) AS tag
     FROM events
     WHERE
         site_id = {siteId:Int32}

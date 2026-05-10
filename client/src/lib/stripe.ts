@@ -8,6 +8,38 @@ export interface StripePrice {
 }
 
 const STRIPE_PRICES: StripePrice[] = [
+  {
+    priceId: "price_1T2No5DFVprnAny2ahUc6TEI",
+    name: "basic100k",
+    interval: "month",
+    price: 14,
+    events: 100_000,
+    shortName: "100k",
+  },
+  {
+    priceId: "price_1T2NqJDFVprnAny21UlXbpxY",
+    name: "basic100k-annual",
+    interval: "year",
+    price: 14 * 8,
+    events: 100_000,
+    shortName: "100k",
+  },
+  {
+    priceId: "price_1T2NpzDFVprnAny2EmAIheV8",
+    name: "basic250k",
+    interval: "month",
+    price: 24,
+    events: 250_000,
+    shortName: "250k",
+  },
+  {
+    priceId: "price_1T2NrRDFVprnAny2N4KhTwQn",
+    name: "basic250k-annual",
+    interval: "year",
+    price: 24 * 8,
+    events: 250_000,
+    shortName: "250k",
+  },
   // Standard tiers
   {
     price: 19,
@@ -136,6 +168,54 @@ const STRIPE_PRICES: StripePrice[] = [
     interval: "year",
     shortName: "20m",
     events: 20_000_000,
+  },
+  {
+    name: "standard30m",
+    priceId: "price_1TC8swDFVprnAny29M5pz5Kl",
+    price: 549,
+    interval: "month",
+    shortName: "30m",
+    events: 30_000_000,
+  },
+  {
+    name: "standard30m-annual",
+    priceId: "price_1TC8vZDFVprnAny2gWX5mw5M",
+    price: 549 * 8,
+    interval: "year",
+    shortName: "30m",
+    events: 30_000_000,
+  },
+  {
+    name: "standard40m",
+    priceId: "price_1TC8yMDFVprnAny233Cfbjb6",
+    price: 699,
+    interval: "month",
+    shortName: "40m",
+    events: 40_000_000,
+  },
+  {
+    name: "standard40m-annual",
+    priceId: "price_1TC90CDFVprnAny27ha82pV3",
+    price: 699 * 8,
+    interval: "year",
+    shortName: "40m",
+    events: 40_000_000,
+  },
+  {
+    name: "standard50m",
+    priceId: "price_1TC911DFVprnAny2148SMHHV",
+    price: 849,
+    interval: "month",
+    shortName: "50m",
+    events: 50_000_000,
+  },
+  {
+    name: "standard50m-annual",
+    priceId: "price_1TC91IDFVprnAny2rLGKQzmy",
+    price: 849 * 8,
+    interval: "year",
+    shortName: "50m",
+    events: 50_000_000,
   },
   // Pro tiers
   {
@@ -266,6 +346,54 @@ const STRIPE_PRICES: StripePrice[] = [
     shortName: "20M",
     events: 20_000_000,
   },
+  {
+    price: 1099,
+    priceId: "price_1TC8x6DFVprnAny2OCjTzaIG",
+    name: "pro30m",
+    interval: "month",
+    shortName: "30M",
+    events: 30_000_000,
+  },
+  {
+    price: 1099 * 8,
+    priceId: "price_1TC8tnDFVprnAny2u4NkOtOD",
+    name: "pro30m-annual",
+    interval: "year",
+    shortName: "30M",
+    events: 30_000_000,
+  },
+  {
+    price: 1399,
+    priceId: "price_1TC8yaDFVprnAny2b96SzRYV",
+    name: "pro40m",
+    interval: "month",
+    shortName: "40M",
+    events: 40_000_000,
+  },
+  {
+    price: 1399 * 8,
+    priceId: "price_1TC90YDFVprnAny25SJs1FuX",
+    name: "pro40m-annual",
+    interval: "year",
+    shortName: "40M",
+    events: 40_000_000,
+  },
+  {
+    price: 1699,
+    priceId: "price_1TC91rDFVprnAny2bLJ8pdUH",
+    name: "pro50m",
+    interval: "month",
+    shortName: "50M",
+    events: 50_000_000,
+  },
+  {
+    price: 1699 * 8,
+    priceId: "price_1TC92BDFVprnAny2uuAeNheH",
+    name: "pro50m-annual",
+    interval: "year",
+    shortName: "50M",
+    events: 50_000_000,
+  },
 ];
 
 export const STRIPE_TIERS = STRIPE_PRICES.filter(
@@ -321,6 +449,9 @@ export const getStripePrices = () => {
 };
 
 export function getPlanType(name: string) {
+  if (name.includes("basic")) {
+    return "Basic";
+  }
   if (name.includes("standard")) {
     return "Standard";
   }

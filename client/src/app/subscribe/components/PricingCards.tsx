@@ -6,6 +6,7 @@ import { toast } from "@/components/ui/sonner";
 import { authClient } from "@/lib/auth";
 import { BACKEND_URL } from "@/lib/const";
 import { cn } from "@/lib/utils";
+import { useExtracted } from "next-intl";
 import { useEffect, useState } from "react";
 import { trackAdEvent } from "../../../lib/trackAdEvent";
 import {
@@ -17,10 +18,12 @@ import {
   formatEventTier
 } from "./utils";
 
+import { CheckoutModal } from "@/components/subscription/components/CheckoutModal";
 import { useRouter } from "next/navigation";
 import { useQueryState } from "nuqs";
 
 export function PricingCards({ isLoggedIn }: { isLoggedIn: boolean }) {
+  const t = useExtracted();
   const [siteId] = useQueryState("siteId");
   const router = useRouter();
 
@@ -28,6 +31,7 @@ export function PricingCards({ isLoggedIn }: { isLoggedIn: boolean }) {
   const [isAnnual, setIsAnnual] = useState<boolean>(true);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [showTestPlan, setShowTestPlan] = useState(false);
+  const [checkoutClientSecret, setCheckoutClientSecret] = useState<string | null>(null);
   const { data: activeOrg } = authClient.useActiveOrganization();
 
   useEffect(() => {
@@ -52,31 +56,29 @@ export function PricingCards({ isLoggedIn }: { isLoggedIn: boolean }) {
 
     // Check if user is logged in directly
     if (!isLoggedIn) {
-      toast.error("Please log in to subscribe.");
+      toast.error(t("Please log in to subscribe."));
       return;
     }
 
     // Check if user has an active organization
     if (!activeOrg) {
-      toast.error("Please select an organization to subscribe.");
+      toast.error(t("Please select an organization to subscribe."));
       return;
     }
 
     const selectedTierPrice = findPriceForTier(eventLimit, isAnnual ? "year" : "month", planType);
 
     if (!selectedTierPrice) {
-      toast.error("Selected pricing plan not found. Please adjust the slider.");
+      toast.error(t("Selected pricing plan not found. Please adjust the slider."));
       return;
     }
 
     setIsLoading(true);
     try {
-      // Use NEXT_PUBLIC_BACKEND_URL if available, otherwise use relative path for same-origin requests
       const baseUrl = window.location.origin;
-      const successUrl = siteId
+      const returnUrl = siteId
         ? `${baseUrl}/${siteId}?session_id={CHECKOUT_SESSION_ID}`
-        : `${baseUrl}/settings/organization/subscription?session_id={CHECKOUT_SESSION_ID}`;
-      const cancelUrl = `${baseUrl}/subscribe${siteId ? `?siteId=${siteId}` : ""}`;
+        : `${baseUrl}/settings/billing?session_id={CHECKOUT_SESSION_ID}`;
 
       const response = await fetch(`${BACKEND_URL}/stripe/create-checkout-session`, {
         method: "POST",
@@ -86,8 +88,7 @@ export function PricingCards({ isLoggedIn }: { isLoggedIn: boolean }) {
         credentials: "include", // Send cookies
         body: JSON.stringify({
           priceId: selectedTierPrice.priceId,
-          successUrl: successUrl,
-          cancelUrl: cancelUrl,
+          returnUrl,
           organizationId: activeOrg.id,
           referral: window.Rewardful?.referral || undefined,
         }),
@@ -97,37 +98,37 @@ export function PricingCards({ isLoggedIn }: { isLoggedIn: boolean }) {
       trackAdEvent("checkout", { tier: selectedTierPrice.name });
 
       if (!response.ok) {
-        throw new Error(data.error || "Failed to create checkout session.");
+        throw new Error(data.error || t("Failed to create checkout session."));
       }
 
-      if (data.checkoutUrl) {
-        window.location.href = data.checkoutUrl; // Redirect to Stripe checkout
+      if (data.clientSecret) {
+        setCheckoutClientSecret(data.clientSecret);
       } else {
-        throw new Error("Checkout URL not received.");
+        throw new Error(t("Checkout session not received."));
       }
+      setIsLoading(false);
     } catch (error: any) {
-      toast.error(`Subscription failed: ${error.message}`);
+      toast.error(t("Subscription failed: {message}", { message: error.message }));
       setIsLoading(false); // Stop loading on error
     }
   }
 
   async function handleTestSubscribe(): Promise<void> {
     if (!isLoggedIn) {
-      toast.error("Please log in to subscribe.");
+      toast.error(t("Please log in to subscribe."));
       return;
     }
     if (!activeOrg) {
-      toast.error("Please select an organization to subscribe.");
+      toast.error(t("Please select an organization to subscribe."));
       return;
     }
 
     setIsLoading(true);
     try {
       const baseUrl = window.location.origin;
-      const successUrl = siteId
+      const returnUrl = siteId
         ? `${baseUrl}/${siteId}?session_id={CHECKOUT_SESSION_ID}`
-        : `${baseUrl}/settings/organization/subscription?session_id={CHECKOUT_SESSION_ID}`;
-      const cancelUrl = `${baseUrl}/subscribe${siteId ? `?siteId=${siteId}` : ""}`;
+        : `${baseUrl}/settings/billing?session_id={CHECKOUT_SESSION_ID}`;
 
       const response = await fetch(`${BACKEND_URL}/stripe/create-checkout-session`, {
         method: "POST",
@@ -135,8 +136,7 @@ export function PricingCards({ isLoggedIn }: { isLoggedIn: boolean }) {
         credentials: "include",
         body: JSON.stringify({
           priceId: "price_1SzT8pDFVprnAny2EdkqxRAZ",
-          successUrl,
-          cancelUrl,
+          returnUrl,
           organizationId: activeOrg.id,
           referral: window.Rewardful?.referral || undefined,
         }),
@@ -145,16 +145,17 @@ export function PricingCards({ isLoggedIn }: { isLoggedIn: boolean }) {
       const data = await response.json();
 
       if (!response.ok) {
-        throw new Error(data.error || "Failed to create checkout session.");
+        throw new Error(data.error || t("Failed to create checkout session."));
       }
 
-      if (data.checkoutUrl) {
-        window.location.href = data.checkoutUrl;
+      if (data.clientSecret) {
+        setCheckoutClientSecret(data.clientSecret);
       } else {
-        throw new Error("Checkout URL not received.");
+        throw new Error(t("Checkout session not received."));
       }
+      setIsLoading(false);
     } catch (error: any) {
-      toast.error(`Subscription failed: ${error.message}`);
+      toast.error(t("Subscription failed: {message}", { message: error.message }));
       setIsLoading(false);
     }
   }
@@ -164,7 +165,7 @@ export function PricingCards({ isLoggedIn }: { isLoggedIn: boolean }) {
     setEventLimitIndex(value[0]);
   }
 
-  // Get pricing information for both plans
+  // Get pricing information for all plans
   const standardMonthlyPrice = findPriceForTier(eventLimit, "month", "standard")?.price || 0;
   const standardAnnualPrice = findPriceForTier(eventLimit, "year", "standard")?.price || 0;
   const proMonthlyPrice = findPriceForTier(eventLimit, "month", "pro")?.price || 0;
@@ -172,144 +173,135 @@ export function PricingCards({ isLoggedIn }: { isLoggedIn: boolean }) {
   const isCustomTier = eventLimit === "Custom";
 
   return (
-    <div className="max-w-[1300px] mx-auto">
-      {/* Shared controls section */}
-      <div className="max-w-xl mx-auto mb-8">
-        <div className="flex justify-between mb-6 items-center">
-          <div>
-            <h3 className="font-semibold mb-2">Monthly pageviews</h3>
-            <div className="text-3xl font-bold text-emerald-400">
-              {typeof eventLimit === "number" ? eventLimit.toLocaleString() : eventLimit}
-            </div>
-          </div>
-          <div className="flex flex-col items-end">
-            {/* Billing toggle */}
-            <div className="relative flex items-center">
-              <div className="flex bg-neutral-150 dark:bg-neutral-850 border border-neutral-250 dark:border-neutral-750 rounded-full p-1 text-sm">
-                <button
-                  onClick={() => setIsAnnual(false)}
-                  className={cn(
-                    "px-3 py-1 rounded-full transition-colors cursor-pointer",
-                    !isAnnual
-                      ? "bg-white dark:bg-white/20 text-neutral-700 dark:text-neutral-100 font-medium"
-                      : "text-neutral-600 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-neutral-200"
-                  )}
-                >
-                  Monthly
-                </button>
-                <button
-                  onClick={() => setIsAnnual(true)}
-                  className={cn(
-                    "px-3 py-1 rounded-full transition-colors cursor-pointer",
-                    isAnnual
-                      ? "bg-white dark:bg-white/20 text-neutral-700 dark:text-neutral-100 font-medium"
-                      : "text-neutral-600 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-neutral-200"
-                  )}
-                >
-                  Annual
-                </button>
-              </div>
-              <span className="absolute -top-3 -right-12 text-xs text-white bg-emerald-500 border border-emerald-500 rounded-full px-2 py-0.5 whitespace-nowrap">
-                4 months free
-              </span>
-            </div>
-          </div>
-        </div>
-
-        {/* Slider */}
-        <Slider
-          defaultValue={[0]}
-          max={EVENT_TIERS.length - 1}
-          min={0}
-          step={1}
-          onValueChange={handleSliderChange}
-          className="mb-3"
-        />
-
-        <div className="flex justify-between text-xs text-neutral-600 dark:text-neutral-400">
-          {EVENT_TIERS.map((tier, index) => (
-            <span
-              key={index}
-              className={cn(eventLimitIndex === index && "font-bold text-emerald-600 dark:text-emerald-400")}
-            >
-              {index === EVENT_TIERS.length - 1 && typeof tier !== "number"
-                ? "20M+"
-                : formatEventTier(tier)}
-            </span>
-          ))}
-        </div>
-      </div>
-
-      {/* Cards section */}
-      <div className="grid min-[1100px]:grid-cols-3 min-[400px]:grid-cols-1 gap-6 max-w-[1000px] mx-auto mb-16">
-        {/* <PricingCard
-          title="Free"
-          description="Perfect for hobby projects"
-          priceDisplay={
+    <>
+      <CheckoutModal
+        clientSecret={checkoutClientSecret}
+        open={!!checkoutClientSecret}
+        onOpenChange={(open) => { if (!open) setCheckoutClientSecret(null); }}
+      />
+      <div className="max-w-[1300px] mx-auto">
+        {/* Shared controls section */}
+        <div className="max-w-xl mx-auto mb-8">
+          <div className="flex justify-between mb-6 items-center">
             <div>
-              <span className="text-3xl font-bold">{DEFAULT_EVENT_LIMIT.toLocaleString()}</span>
-              <span className="ml-1 text-neutral-600 dark:text-neutral-400">pageviews/m</span>
+              <h3 className="font-semibold mb-2">{t("Monthly pageviews")}</h3>
+              <div className="text-3xl font-bold text-emerald-400">
+                {typeof eventLimit === "number" ? eventLimit.toLocaleString() : eventLimit}
+              </div>
             </div>
-          }
-          buttonText={siteId ? "Continue free" : "Current plan"}
-          buttonVariant="default"
-          features={FREE_FEATURES}
-          variant="free"
-          onClick={() => (siteId ? router.push(`/${siteId}`) : undefined)}
-          disabled={!siteId}
-        /> */}
-        <PricingCard
-          title="Standard"
-          description="Everything you need to get started as a small business"
-          monthlyPrice={standardMonthlyPrice}
-          annualPrice={standardAnnualPrice}
-          isAnnual={isAnnual}
-          isCustomTier={isCustomTier}
-          buttonText={isLoading ? "Processing..." : isCustomTier ? "Contact us" : "Get started"}
-          features={STANDARD_FEATURES}
-          onClick={() => handleSubscribe("standard")}
-          disabled={isLoading}
-        />
-        <PricingCard
-          title="Pro"
-          description="Advanced features for professional teams"
-          isCustomTier={isCustomTier}
-          monthlyPrice={proMonthlyPrice}
-          annualPrice={proAnnualPrice}
-          isAnnual={isAnnual}
-          buttonText={isLoading ? "Processing..." : isCustomTier ? "Contact us" : "Get started"}
-          features={PRO_FEATURES}
-          recommended={true}
-          onClick={() => handleSubscribe("pro")}
-          disabled={isLoading}
-        />
+            <div className="flex flex-col items-end">
+              {/* Billing toggle */}
+              <div className="relative flex items-center">
+                <div className="flex bg-neutral-150 dark:bg-neutral-850 border border-neutral-250 dark:border-neutral-750 rounded-full p-1 text-sm">
+                  <button
+                    onClick={() => setIsAnnual(false)}
+                    className={cn(
+                      "px-3 py-1 rounded-full transition-colors cursor-pointer",
+                      !isAnnual
+                        ? "bg-white dark:bg-white/20 text-neutral-700 dark:text-neutral-100 font-medium"
+                        : "text-neutral-600 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-neutral-200"
+                    )}
+                  >
+                    {t("Monthly")}
+                  </button>
+                  <button
+                    onClick={() => setIsAnnual(true)}
+                    className={cn(
+                      "px-3 py-1 rounded-full transition-colors cursor-pointer",
+                      isAnnual
+                        ? "bg-white dark:bg-white/20 text-neutral-700 dark:text-neutral-100 font-medium"
+                        : "text-neutral-600 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-neutral-200"
+                    )}
+                  >
+                    {t("Annual")}
+                  </button>
+                </div>
+                <span className="absolute -top-3 -right-12 text-xs text-white bg-emerald-500 border border-emerald-500 rounded-full px-2 py-0.5 whitespace-nowrap">
+                  {t("4 months free")}
+                </span>
+              </div>
+            </div>
+          </div>
 
-        {showTestPlan && (
+          {/* Slider */}
+          <Slider
+            defaultValue={[0]}
+            max={EVENT_TIERS.length - 1}
+            min={0}
+            step={1}
+            onValueChange={handleSliderChange}
+            className="mb-3"
+          />
+
+          <div className="flex justify-between text-xs text-neutral-600 dark:text-neutral-400">
+            {EVENT_TIERS.map((tier, index) => (
+              <span
+                key={index}
+                className={cn(eventLimitIndex === index && "font-bold text-emerald-600 dark:text-emerald-400")}
+              >
+                {index === EVENT_TIERS.length - 1 && typeof tier !== "number"
+                  ? "50M+"
+                  : formatEventTier(tier)}
+              </span>
+            ))}
+          </div>
+        </div>
+
+        {/* Cards section */}
+        <div className="grid min-[1100px]:grid-cols-3 min-[700px]:grid-cols-2 min-[400px]:grid-cols-1 gap-4 mx-auto mb-16">
           <PricingCard
-            title="Test"
-            description="$1 test subscription for development"
+            title="Standard"
+            description={t("Everything you need to get started as a small business")}
+            monthlyPrice={standardMonthlyPrice}
+            annualPrice={standardAnnualPrice}
+            isAnnual={isAnnual}
             isCustomTier={isCustomTier}
-            buttonText={isLoading ? "Processing..." : "Subscribe ($1)"}
-            features={["Test plan"]}
-            onClick={() => handleTestSubscribe()}
+            buttonText={isLoading ? t("Processing...") : isCustomTier ? t("Contact us") : t("Start free trial")}
+            features={STANDARD_FEATURES}
+            onClick={() => handleSubscribe("standard")}
             disabled={isLoading}
           />
-        )}
+          <PricingCard
+            title="Pro"
+            description={t("Advanced features for professional teams")}
+            isCustomTier={isCustomTier}
+            monthlyPrice={proMonthlyPrice}
+            annualPrice={proAnnualPrice}
+            isAnnual={isAnnual}
+            buttonText={isLoading ? t("Processing...") : isCustomTier ? t("Contact us") : t("Start free trial")}
+            features={PRO_FEATURES}
+            recommended={true}
+            onClick={() => handleSubscribe("pro")}
+            disabled={isLoading}
+          />
 
-        <PricingCard
-          title="Enterprise"
-          description="Advanced features for enterprise teams"
-          features={ENTERPRISE_FEATURES}
-          isCustomTier={true}
-          customButton={
-            <a href="https://www.rybbit.com/contact" className="w-full block">
-              <button className="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-medium px-5 py-3 rounded-lg shadow-lg shadow-emerald-900/20 transform hover:-translate-y-0.5 transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:ring-opacity-50 cursor-pointer">
-                Contact us
-              </button>
-            </a>
-          }
-        />
+          {showTestPlan && (
+            <PricingCard
+              title="Test"
+              description={t("$1 test subscription for development")}
+              isCustomTier={isCustomTier}
+              buttonText={isLoading ? t("Processing...") : t("Subscribe ($1)")}
+              features={["Test plan"]}
+              onClick={() => handleTestSubscribe()}
+              disabled={isLoading}
+            />
+          )}
+
+          <PricingCard
+            title="Enterprise"
+            description={t("Advanced features for enterprise teams")}
+            features={ENTERPRISE_FEATURES}
+            isCustomTier={true}
+            customButton={
+              <a href="https://www.rybbit.com/contact" className="w-full block">
+                <button className="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-medium px-5 py-3 rounded-lg shadow-lg shadow-emerald-900/20 transform hover:-translate-y-0.5 transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:ring-opacity-50 cursor-pointer">
+                  {t("Contact us")}
+                </button>
+              </a>
+            }
+          />
+        </div>
       </div>
-    </div>
+    </>
   );
 }

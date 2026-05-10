@@ -1,10 +1,14 @@
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/be982e50-8d59-471c-9fb7-e8982658a608" height="100">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/public/rybbit/horizontal_white.svg">
+    <source media="(prefers-color-scheme: light)" srcset="docs/public/rybbit/horizontal_black.svg">
+    <img src="docs/public/rybbit/horizontal_black.svg" height="70" alt="Rybbit">
+  </picture>
     <p align="center">Open Source Web & Product Analytics</p>
 
 <p align="center">
     <a href="https://rybbit.com" target="_blank">Website</a> |
-    <a href="https://demo.rybbit.com/1" target="_blank">Demo</a> |
+    <a href="https://demo.rybbit.com/81" target="_blank">Demo</a> |
     <a href="https://rybbit.com/docs" target="_blank">Documentation</a> |
     <a href="https://discord.gg/DEhGb4hYBj" target="_blank">Discord</a> |
     <a href="https://github.com/rybbit-io/rybbit?tab=AGPL-3.0-1-ov-file" target="_blank">License (AGPL-3)</a> |

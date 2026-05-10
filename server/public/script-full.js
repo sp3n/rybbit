@@ -110,6 +110,7 @@
     const sessionReplaySlimDOMOptions = slimDOMAttr ? parseJsonSafely(slimDOMAttr, {}) : void 0;
     const sampleRateAttr = scriptTag.getAttribute("data-replay-sample-rate");
     const sessionReplaySampleRate = sampleRateAttr ? Math.min(100, Math.max(0, parseInt(sampleRateAttr, 10))) : void 0;
+    const tag = scriptTag.getAttribute("data-tag") || "";
     const defaultConfig = {
       namespace,
       analyticsHost,
@@ -131,6 +132,7 @@
       trackButtonClicks: false,
       trackCopy: false,
       trackFormInteractions: false,
+      tag,
       // rrweb session replay options (undefined means use rrweb defaults)
       sessionReplayBlockClass,
       sessionReplayBlockSelector,
@@ -378,6 +380,49 @@
     }
   };
 
+  // botSignals.ts
+  function getBotScore() {
+    let score = 0;
+    try {
+      if (navigator.webdriver === true) {
+        score++;
+      }
+      if (window.outerHeight === 0 || window.outerWidth === 0) {
+        score++;
+      }
+      if (navigator.connection?.rtt === 0) {
+        score++;
+      }
+      if (!window.chrome && /Chrome\//.test(navigator.userAgent) && !/\bwv\b|; wv\)/.test(navigator.userAgent)) {
+        score++;
+      }
+      try {
+        const canvas = document.createElement("canvas");
+        const gl = canvas.getContext("webgl") || canvas.getContext("experimental-webgl");
+        if (gl) {
+          const debugInfo = gl.getExtension("WEBGL_debug_renderer_info");
+          if (debugInfo) {
+            const renderer = gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL);
+            if (typeof renderer === "string" && renderer.includes("SwiftShader")) {
+              score++;
+            }
+          }
+        }
+      } catch (e2) {
+      }
+      if (navigator.plugins.length === 0 && /Chrome\//.test(navigator.userAgent) && !/\bwv\b|; wv\)/.test(navigator.userAgent)) {
+        score++;
+      }
+      try {
+        if (typeof Notification !== "undefined" && Notification.permission === "denied") {
+        }
+      } catch (e2) {
+      }
+    } catch (e2) {
+    }
+    return score;
+  }
+
   // tracking.ts
   var Tracker = class {
     constructor(config) {
@@ -450,10 +495,14 @@
         screenHeight: screen.height,
         language: navigator.language,
         page_title: document.title,
-        referrer: document.referrer
+        referrer: document.referrer,
+        _bs: getBotScore()
       };
       if (this.customUserId) {
         payload.user_id = this.customUserId;
+      }
+      if (this.config.tag) {
+        payload.tag = this.config.tag;
       }
       return payload;
     }
@@ -768,11 +817,13 @@
         }));
       }));
     }
-    return { get firstHiddenTime() {
-      return u;
-    }, onHidden(e2) {
-      l.add(e2);
-    } };
+    return {
+      get firstHiddenTime() {
+        return u;
+      }, onHidden(e2) {
+        l.add(e2);
+      }
+    };
   };
   var g = (e2) => {
     document.prerendering ? addEventListener("prerenderingchange", (() => e2()), true) : e2();
@@ -1161,7 +1212,7 @@
   };
 
   // index.ts
-  (async function() {
+  (async function () {
     const scriptTag = document.currentScript;
     if (!scriptTag) {
       console.error("Could not find current script tag");
@@ -1194,6 +1245,23 @@
       };
       return;
     }
+    const earlyQueue = [];
+    const queueMethod = (method) => (...args) => {
+      earlyQueue.push([method, args]);
+    };
+    window[namespace] = {
+      pageview: queueMethod("pageview"),
+      event: queueMethod("event"),
+      error: queueMethod("error"),
+      trackOutbound: queueMethod("trackOutbound"),
+      identify: queueMethod("identify"),
+      setTraits: queueMethod("setTraits"),
+      clearUserId: queueMethod("clearUserId"),
+      getUserId: () => null,
+      startSessionReplay: queueMethod("startSessionReplay"),
+      stopSessionReplay: queueMethod("stopSessionReplay"),
+      isSessionReplayActive: () => false
+    };
     const config = await parseScriptConfig(scriptTag);
     if (!config) {
       return;
@@ -1238,7 +1306,7 @@
     const trackPageview = () => tracker.trackPageview();
     const debouncedTrackPageview = config.debounceDuration > 0 ? debounce(trackPageview, config.debounceDuration) : trackPageview;
     function setupEventListeners() {
-      document.addEventListener("click", function(e2) {
+      document.addEventListener("click", function (e2) {
         let target = e2.target;
         while (target && target !== document.documentElement) {
           if (target.hasAttribute("data-rybbit-event")) {
@@ -1267,12 +1335,12 @@
       if (config.autoTrackSpa) {
         const originalPushState = history.pushState;
         const originalReplaceState = history.replaceState;
-        history.pushState = function(...args) {
+        history.pushState = function (...args) {
           originalPushState.apply(this, args);
           debouncedTrackPageview();
           tracker.onPageChange();
         };
-        history.replaceState = function(...args) {
+        history.replaceState = function (...args) {
           originalReplaceState.apply(this, args);
           debouncedTrackPageview();
           tracker.onPageChange();
@@ -1300,6 +1368,10 @@
       stopSessionReplay: () => tracker.stopSessionReplay(),
       isSessionReplayActive: () => tracker.isSessionReplayActive()
     };
+    const api = window[config.namespace];
+    for (const [method, args] of earlyQueue) {
+      api[method](...args);
+    }
     setupEventListeners();
     window.addEventListener("beforeunload", () => {
       clickManager?.cleanup();

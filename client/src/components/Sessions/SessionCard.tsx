@@ -4,11 +4,13 @@ import { addFilter, getTimezone } from "@/lib/store";
 import { FilterParameter } from "@rybbit/shared";
 import { ArrowRight, ChevronDown, ChevronRight, Video } from "lucide-react";
 import { DateTime } from "luxon";
+import { useExtracted } from "next-intl";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { memo, useCallback, useState } from "react";
 import { GetSessionsResponse } from "../../api/analytics/endpoints";
-import { formatShortDuration, hour12, userLocale } from "../../lib/dateTimeUtils";
+import { useDateTimeFormat } from "@/hooks/useDateTimeFormat";
+import { formatShortDuration } from "../../lib/dateTimeUtils";
 import { cn, formatter, getUserDisplayName, truncateString } from "../../lib/utils";
 import { Avatar } from "../Avatar";
 import { Channel } from "../Channel";
@@ -34,6 +36,8 @@ interface SessionCardProps {
 
 export function SessionCard({ session, onClick, userId, expandedByDefault, highlightedEventTimestamp }: SessionCardProps) {
   const { site } = useParams();
+  const t = useExtracted();
+  const { hour12, formatDateTime } = useDateTimeFormat();
   const [expanded, setExpanded] = useState(expandedByDefault || false);
   const [replayDrawerOpen, setReplayDrawerOpen] = useState(false);
   // Calculate session duration in minutes
@@ -41,6 +45,9 @@ export function SessionCard({ session, onClick, userId, expandedByDefault, highl
   const end = DateTime.fromSQL(session.session_end);
   const totalSeconds = Math.floor(end.diff(start).milliseconds / 1000);
   const duration = formatShortDuration(totalSeconds);
+  const relativeTime = DateTime.fromSQL(session.session_start, { zone: "utc" })
+    .setZone(getTimezone())
+    .toRelative();
   const isIdentified = !!session.identified_user_id;
 
   const handleCardClick = () => {
@@ -65,7 +72,7 @@ export function SessionCard({ session, onClick, userId, expandedByDefault, highl
   );
 
   return (
-    <div className="rounded-lg bg-white dark:bg-neutral-900 border border-neutral-100 dark:border-neutral-850 overflow-hidden">
+    <div className="rounded-lg bg-white dark:bg-neutral-900 border border-neutral-100 dark:border-neutral-850 overflow-hidden group/card">
       <div className="p-3 cursor-pointer" onClick={handleCardClick}>
         {/* Mobile layout - two rows */}
         <div className="flex flex-col gap-2 md:hidden">
@@ -82,13 +89,18 @@ export function SessionCard({ session, onClick, userId, expandedByDefault, highl
               </span>
               {!!session.identified_user_id && <IdentifiedBadge traits={session.traits} />}
             </div>
-            <span className="text-xs text-neutral-500 dark:text-neutral-400">
-              {DateTime.fromSQL(session.session_start, {
-                zone: "utc",
-              })
-                .setLocale(userLocale)
-                .setZone(getTimezone())
-                .toFormat(hour12 ? "MMM d, h:mm a" : "dd MMM, HH:mm")}
+            <span className="text-xs text-neutral-500 dark:text-neutral-400 ">
+              <span className="group-hover/card:hidden">
+                {formatDateTime(DateTime.fromSQL(session.session_start, { zone: "utc" }), {
+                  month: "short",
+                  day: "numeric",
+                  hour: "numeric",
+                  minute: "2-digit",
+                  hour12,
+                  timeZone: getTimezone(),
+                })}
+              </span>
+              <span className="hidden group-hover/card:inline">{relativeTime}</span>
             </span>
           </div>
 
@@ -131,7 +143,7 @@ export function SessionCard({ session, onClick, userId, expandedByDefault, highl
                     <Video className="w-4 h-4" />
                   </Badge>
                 </TooltipTrigger>
-                <TooltipContent>Watch Session Replay</TooltipContent>
+                <TooltipContent>{t("Watch Session Replay")}</TooltipContent>
               </Tooltip>
             )}
             <Tooltip>
@@ -141,7 +153,7 @@ export function SessionCard({ session, onClick, userId, expandedByDefault, highl
                   <span>{formatter(session.pageviews)}</span>
                 </Badge>
               </TooltipTrigger>
-              <TooltipContent>Pageviews</TooltipContent>
+              <TooltipContent>{t("Pageviews")}</TooltipContent>
             </Tooltip>
             <Tooltip>
               <TooltipTrigger asChild>
@@ -150,7 +162,7 @@ export function SessionCard({ session, onClick, userId, expandedByDefault, highl
                   <span>{formatter(session.events + (session.button_clicks || 0) + (session.copies || 0) + (session.form_submits || 0) + (session.input_changes || 0))}</span>
                 </Badge>
               </TooltipTrigger>
-              <TooltipContent>Events</TooltipContent>
+              <TooltipContent>{t("Events")}</TooltipContent>
             </Tooltip>
             <Channel
               channel={session.channel}
@@ -221,7 +233,7 @@ export function SessionCard({ session, onClick, userId, expandedByDefault, highl
                     <Video className="w-4 h-4" />
                   </Badge>
                 </TooltipTrigger>
-                <TooltipContent>Watch Session Replay</TooltipContent>
+                <TooltipContent>{t("Watch Session Replay")}</TooltipContent>
               </Tooltip>
             )}
             <Tooltip>
@@ -231,7 +243,7 @@ export function SessionCard({ session, onClick, userId, expandedByDefault, highl
                   <span>{formatter(session.pageviews)}</span>
                 </Badge>
               </TooltipTrigger>
-              <TooltipContent>Pageviews</TooltipContent>
+              <TooltipContent>{t("Pageviews")}</TooltipContent>
             </Tooltip>
             <Tooltip>
               <TooltipTrigger asChild>
@@ -240,7 +252,7 @@ export function SessionCard({ session, onClick, userId, expandedByDefault, highl
                   <span>{formatter(session.events + (session.button_clicks || 0) + (session.copies || 0) + (session.form_submits || 0) + (session.input_changes || 0))}</span>
                 </Badge>
               </TooltipTrigger>
-              <TooltipContent>Events</TooltipContent>
+              <TooltipContent>{t("Events")}</TooltipContent>
             </Tooltip>
             <Channel
               channel={session.channel}
@@ -284,13 +296,18 @@ export function SessionCard({ session, onClick, userId, expandedByDefault, highl
 
           {/* Time information */}
           <div className="flex items-center gap-1.5 text-xs text-neutral-600 dark:text-neutral-300">
-            <span className="text-neutral-500 dark:text-neutral-400">
-              {DateTime.fromSQL(session.session_start, {
-                zone: "utc",
-              })
-                .setLocale(userLocale)
-                .setZone(getTimezone())
-                .toFormat(hour12 ? "MMM d, h:mm a" : "dd MMM, HH:mm")}
+            <span className="text-neutral-500 dark:text-neutral-400 ">
+              <span className="group-hover/card:hidden">
+                {formatDateTime(DateTime.fromSQL(session.session_start, { zone: "utc" }), {
+                  month: "short",
+                  day: "numeric",
+                  hour: "numeric",
+                  minute: "2-digit",
+                  hour12,
+                  timeZone: getTimezone(),
+                })}
+              </span>
+              <span className="hidden group-hover/card:inline">{relativeTime}</span>
             </span>
             <span className="text-neutral-500 dark:text-neutral-400">•</span>
             <span>{duration}</span>

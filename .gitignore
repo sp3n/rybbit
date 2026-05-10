@@ -47,3 +47,5 @@ coverage/
 .cursor/
 
 .claude/
+
+.agents/

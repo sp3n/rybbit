@@ -1,6 +1,7 @@
 "use client";
 
 import { Download, FileArchive, FileText, Loader2 } from "lucide-react";
+import { useExtracted } from "next-intl";
 import { useState } from "react";
 import { toast } from "@/components/ui/sonner";
 import { Button } from "../../../../../components/ui/button";
@@ -17,6 +18,7 @@ import { exportPdf } from "./exportPdf";
 import { useStripeSubscription } from "../../../../../lib/subscription/useStripeSubscription";
 
 export function ExportButton() {
+  const t = useExtracted();
   const [isExportingCsv, setIsExportingCsv] = useState(false);
   const [isExportingPdf, setIsExportingPdf] = useState(false);
   const { site, time, filters } = useStore();
@@ -24,7 +26,7 @@ export function ExportButton() {
 
   const handleExportPdf = async () => {
     if (!site) {
-      toast.error("No site selected");
+      toast.error(t("No site selected"));
       return;
     }
 
@@ -32,10 +34,10 @@ export function ExportButton() {
 
     try {
       await exportPdf({ site, time, filters, timeZone: getTimezone() });
-      toast.success("PDF report downloaded");
+      toast.success(t("PDF report downloaded"));
     } catch (error) {
       console.error("PDF export failed:", error);
-      toast.error(error instanceof Error ? error.message : "Failed to generate PDF report");
+      toast.error(error instanceof Error ? error.message : t("Failed to generate PDF report"));
     } finally {
       setIsExportingPdf(false);
     }
@@ -43,7 +45,7 @@ export function ExportButton() {
 
   const handleExportCsv = async () => {
     if (!site) {
-      toast.error("No site selected");
+      toast.error(t("No site selected"));
       return;
     }
 
@@ -51,10 +53,10 @@ export function ExportButton() {
 
     try {
       const fileCount = await exportCsv({ site, time, filters, timeZone: getTimezone() });
-      toast.success(`Exported ${fileCount} files`);
+      toast.success(t("Exported {fileCount} files", { fileCount: String(fileCount) }));
     } catch (error) {
       console.error("Export failed:", error);
-      toast.error(error instanceof Error ? error.message : "Export failed. Please try again.");
+      toast.error(error instanceof Error ? error.message : t("Export failed. Please try again."));
     } finally {
       setIsExportingCsv(false);
     }
@@ -73,19 +75,19 @@ export function ExportButton() {
           </DropdownMenuTrigger>
         </TooltipTrigger>
         <TooltipContent>
-          <p>Export data</p>
+          <p>{t("Export data")}</p>
         </TooltipContent>
       </Tooltip>
       <DropdownMenuContent align="end">
         {subscription?.planName !== "free" && !["appsumo-1", "appsumo-2"].includes(subscription?.planName ?? "") &&
           <DropdownMenuItem onClick={handleExportPdf} disabled={isExportingPdf}>
             <FileText className="h-4 w-4 mr-2" />
-            {isExportingPdf ? "Generating PDF..." : "Export as PDF Report"}
+            {isExportingPdf ? t("Generating PDF...") : t("Export as PDF Report")}
           </DropdownMenuItem>
         }
         <DropdownMenuItem onClick={handleExportCsv} disabled={isExportingCsv}>
           <FileArchive className="h-4 w-4 mr-2" />
-          {isExportingCsv ? "Exporting..." : "Export as CSV (ZIP)"}
+          {isExportingCsv ? t("Exporting...") : t("Export as CSV (ZIP)")}
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>

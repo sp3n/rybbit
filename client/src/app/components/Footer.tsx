@@ -3,7 +3,6 @@ import { useWhiteLabel } from "../../hooks/useIsWhiteLabel";
 export function Footer() {
   const APP_VERSION = process.env.NEXT_PUBLIC_APP_VERSION;
   const { isWhiteLabel } = useWhiteLabel();
-
   if (isWhiteLabel) {
     return null;
   }

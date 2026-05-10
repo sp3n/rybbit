@@ -1,4 +1,5 @@
 import { Tag, Settings } from "lucide-react";
+import { useExtracted } from "next-intl";
 import Link from "next/link";
 import { useRef } from "react";
 import { useGetOverview } from "../api/analytics/hooks/useGetOverview";
@@ -17,6 +18,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 
 interface SiteCardProps {
   siteId: number;
+  name: string;
   domain: string;
   tags?: string[];
   allTags?: string[];
@@ -25,7 +27,8 @@ interface SiteCardProps {
   onTagClick?: (tag: string) => void;
 }
 
-export function SiteCard({ siteId, domain, tags = [], allTags = [], onTagsUpdated, selectedTags = [], onTagClick }: SiteCardProps) {
+export function SiteCard({ siteId, name, domain, tags = [], allTags = [], onTagsUpdated, selectedTags = [], onTagClick }: SiteCardProps) {
+  const t = useExtracted();
   const { ref, isInView } = useInView({
     // Start loading slightly before the card comes into view
     rootMargin: "200px",
@@ -103,7 +106,7 @@ export function SiteCard({ siteId, domain, tags = [], allTags = [], onTagsUpdate
           <>
             <div className="flex gap-2 items-center">
               <Favicon domain={domain} className="w-6 h-6" />
-              <span className="text-lg font-medium truncate group-hover:underline transition-all">{domain}</span>
+              <span className="text-lg font-medium truncate group-hover:underline transition-all">{name}</span>
               <div onClick={(e) => e.preventDefault()}>
                 <Tooltip>
                   <SiteSettings
@@ -116,7 +119,7 @@ export function SiteCard({ siteId, domain, tags = [], allTags = [], onTagsUpdate
                       </TooltipTrigger>
                     }
                   />
-                  <TooltipContent>Site Settings</TooltipContent>
+                  <TooltipContent>{t("Site Settings")}</TooltipContent>
                 </Tooltip>
               </div>
               {/* Tags display */}
@@ -153,7 +156,7 @@ export function SiteCard({ siteId, domain, tags = [], allTags = [], onTagsUpdate
                         </TooltipTrigger>
                       }
                     />
-                    <TooltipContent>Edit Tags</TooltipContent>
+                    <TooltipContent>{t("Edit Tags")}</TooltipContent>
                   </Tooltip>
                 )}
               </div>
@@ -163,14 +166,14 @@ export function SiteCard({ siteId, domain, tags = [], allTags = [], onTagsUpdate
                 <SiteSessionChart data={data?.data ?? []} />
                 {!hasData && (
                   <div className="absolute inset-0 flex items-center justify-center bg-white/70 dark:bg-neutral-900/70 backdrop-blur-sm">
-                    <span className="text-sm text-neutral-500 dark:text-neutral-400">No data available</span>
+                    <span className="text-sm text-neutral-500 dark:text-neutral-400">{t("No data available")}</span>
                   </div>
                 )}
               </div>
 
               <div className="grid grid-cols-2 gap-2 w-full sm:w-75">
                 <div className="flex flex-col items-start gap-1 rounded-md p-2 transition-colors">
-                  <div className="text-xs text-neutral-500 dark:text-neutral-400">Sessions</div>
+                  <div className="text-xs text-neutral-500 dark:text-neutral-400">{t("Sessions")}</div>
                   <div className="font-semibold text-xl flex gap-2">
                     {formatter(overviewData?.data?.sessions ?? 0)}{" "}
                     {overviewData?.data?.sessions && overviewDataPrevious?.data?.sessions ? (
@@ -183,7 +186,7 @@ export function SiteCard({ siteId, domain, tags = [], allTags = [], onTagsUpdate
                 </div>
 
                 <div className="flex flex-col items-start gap-1 rounded-md p-2 transition-colors">
-                  <div className="text-xs text-neutral-500 dark:text-neutral-400">Users</div>
+                  <div className="text-xs text-neutral-500 dark:text-neutral-400">{t("Users")}</div>
                   <div className="font-semibold text-xl flex gap-2">
                     {formatter(overviewData?.data?.users ?? 0)}{" "}
                     {overviewData?.data?.users && overviewDataPrevious?.data?.users ? (

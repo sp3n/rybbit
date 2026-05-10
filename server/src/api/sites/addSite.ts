@@ -1,4 +1,5 @@
 import { randomBytes } from "crypto";
+import { eq } from "drizzle-orm";
 import { FastifyReply, FastifyRequest } from "fastify";
 import { db } from "../../db/postgres/postgres.js";
 import { sites } from "../../db/postgres/schema.js";
@@ -86,6 +87,20 @@ export async function addSite(
         return reply.status(403).send({
           error: `The following features require an active subscription: ${requestedStandard.map(([k]) => k).join(", ")}`,
         });
+      }
+
+      // Enforce site limit
+      const siteLimit = subscription?.siteLimit ?? null;
+      if (siteLimit !== null) {
+        const existingSites = await db
+          .select({ siteId: sites.siteId })
+          .from(sites)
+          .where(eq(sites.organizationId, organizationId));
+        if (existingSites.length >= siteLimit) {
+          return reply.status(403).send({
+            error: `You have reached the limit of ${siteLimit} website${siteLimit === 1 ? "" : "s"} for your plan. Please upgrade to add more.`,
+          });
+        }
       }
     }
 

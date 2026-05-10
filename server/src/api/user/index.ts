@@ -9,6 +9,5 @@ export { updateAccountSettings } from "./updateAccountSettings.js";
 export { unsubscribeMarketing, oneClickUnsubscribeMarketing } from "./unsubscribeMarketing.js";
 
 // API Keys
-export { listApiKeys } from "./listApiKeys.js";
-export { createApiKey } from "./createApiKey.js";
-export { deleteApiKey } from "./deleteApiKey.js";
+export { createUserApiKey } from "./createApiKey.js";
+

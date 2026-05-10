@@ -6,65 +6,44 @@ import { ResponsiveLine } from "@nivo/line";
 import { DateTime } from "luxon";
 import { GetOverviewBucketedResponse } from "../../../../../api/analytics/endpoints";
 import { APIResponse } from "../../../../../api/types";
-import { Time } from "../../../../../components/DateSelector/types";
-import { TimeBucket } from "@rybbit/shared";
-
-const getMin = (time: Time, bucket: TimeBucket, timezone: string) => {
-  if (time.mode === "day") {
-    const dayDate = DateTime.fromISO(time.day, { zone: timezone }).startOf("day");
-    return dayDate.toJSDate();
-  } else if (time.mode === "week") {
-    const weekDate = DateTime.fromISO(time.week, { zone: timezone }).startOf("week");
-    return weekDate.toJSDate();
-  } else if (time.mode === "month") {
-    const monthDate = DateTime.fromISO(time.month, { zone: timezone }).startOf("month");
-    return monthDate.toJSDate();
-  } else if (time.mode === "year") {
-    const yearDate = DateTime.fromISO(time.year, { zone: timezone }).startOf("year");
-    return yearDate.toJSDate();
-  }
-  // else if (time.mode === "past-minutes") {
-  //   if (bucket === "hour") {
-  //     return DateTime.now()
-  //       .setZone("UTC")
-  //       .minus({ minutes: time.past_minutes_start * 2 })
-  //       .startOf("hour")
-  //       .toJSDate();
-  //   }
-  //   undefined;
-  // }
-  return undefined;
-};
+import { getChartTimeBounds } from "./chartTimeBounds";
 
 export function PreviousChart({
   data,
   max,
+  chartXMax,
 }: {
   data: APIResponse<GetOverviewBucketedResponse> | undefined;
   max: number;
+  chartXMax: Date | undefined;
 }) {
-  const { previousTime: time, selectedStat, bucket } = useStore();
+  const { time, previousTime, selectedStat, bucket } = useStore();
   const { resolvedTheme } = useTheme();
   const nivoTheme = useNivoTheme();
 
   const timezone = getTimezone();
-  const size = (data?.data.length ?? 0 / 2) + 1;
-  const formattedData = data?.data
-    ?.map(e => {
-      // Parse timestamp in the selected timezone, then convert to UTC for chart
-      const timestamp = DateTime.fromSQL(e.time, { zone: timezone }).toUTC();
-      return {
-        x: timestamp.toFormat("yyyy-MM-dd HH:mm:ss"),
-        y: e[selectedStat],
-      };
-    })
-    .slice(0, size);
 
-  const min = getMin(time, bucket, timezone);
-  const maxPastMinutes =
-    time.mode === "past-minutes" && bucket === "hour"
-      ? DateTime.now().setZone("UTC").minus({ minutes: time.pastMinutesStart }).startOf("hour").toJSDate()
-      : undefined;
+  // Plot previous data on the CURRENT period's x-axis. Each previous timestamp
+  // is shifted by (currentStart − prevStart) so the i-th bucket of each period
+  // sits at the same x position — keeps day-of-month alignment when the months
+  // have different lengths (e.g. April vs March). Drop anything past the
+  // shared right edge so the previous line stops where the current line does.
+  const { min: chartMin, max: boundsMax } = getChartTimeBounds(time, bucket, timezone);
+  const { min: prevMin } = getChartTimeBounds(previousTime, bucket, timezone);
+  const offsetMs = chartMin && prevMin ? chartMin.getTime() - prevMin.getTime() : 0;
+  const chartMax = chartXMax ?? boundsMax;
+
+  const formattedData = data?.data?.flatMap(e => {
+    const prevTs = DateTime.fromSQL(e.time, { zone: timezone });
+    const mappedMs = prevTs.toMillis() + offsetMs;
+    if (chartMax && mappedMs > chartMax.getTime()) return [];
+    return [
+      {
+        x: DateTime.fromMillis(mappedMs, { zone: "utc" }).toFormat("yyyy-MM-dd HH:mm:ss"),
+        y: e[selectedStat],
+      },
+    ];
+  });
 
   return (
     <ResponsiveLine
@@ -81,8 +60,8 @@ export function PreviousChart({
         format: "%Y-%m-%d %H:%M:%S",
         precision: "second",
         useUTC: true,
-        min,
-        // max: maxPastMinutes,
+        min: chartMin,
+        max: chartMax,
       }}
       yScale={{
         type: "linear",

@@ -18,6 +18,8 @@ export interface SubscriptionData {
   trialDaysRemaining?: number;
   message?: string; // For expired trial message
   isOverride?: boolean;
+  memberLimit: number | null;
+  siteLimit: number | null;
 }
 
 export function useStripeSubscription(): UseQueryResult<SubscriptionData | undefined, Error> {

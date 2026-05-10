@@ -3,9 +3,15 @@
 import { useState, useMemo } from "react";
 import { useAdminOrganizations } from "@/api/admin/hooks/useAdminOrganizations";
 import { Button } from "@/components/ui/button";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Tabs, TabsContent } from "@/components/ui/tabs";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { DateTime } from "luxon";
-import { SearchInput } from "../shared/SearchInput";
 import { ErrorAlert } from "../shared/ErrorAlert";
 import { AdminLayout } from "../shared/AdminLayout";
 import { GrowthChart } from "../shared/GrowthChart";
@@ -16,10 +22,13 @@ import { OrganizationFilters, TierOption } from "./OrganizationFilters";
 import { FilteredStatsCards } from "./FilteredStatsCards";
 import { useFilteredOrganizations } from "./useFilteredOrganizations";
 import { DownloadIcon } from "lucide-react";
+import { useExtracted } from "next-intl";
 
 export function Organizations() {
   const { data: organizations, isLoading, isError } = useAdminOrganizations();
+  const t = useExtracted();
 
+  const [activeTab, setActiveTab] = useState("growth");
   const [searchQuery, setSearchQuery] = useState("");
 
   // Filter states
@@ -65,23 +74,28 @@ export function Organizations() {
   if (isError) {
     return (
       <AdminLayout>
-        <ErrorAlert message="Failed to load organizations data. Please try again later." />
+        <ErrorAlert message={t("Failed to load organizations data. Please try again later.")} />
       </AdminLayout>
     );
   }
 
   return (
     <AdminLayout>
-      <Tabs defaultValue="growth" className="mb-6">
+      <Tabs value={activeTab} onValueChange={setActiveTab} className="mb-6">
         <div className="flex items-center justify-between mb-2">
-          <TabsList>
-            <TabsTrigger value="growth">Organization Growth</TabsTrigger>
-            <TabsTrigger value="usage">Service Usage</TabsTrigger>
-            <TabsTrigger value="subscriptions">Subscription Tiers</TabsTrigger>
-          </TabsList>
+          <Select value={activeTab} onValueChange={setActiveTab}>
+            <SelectTrigger className="w-[200px]">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="growth">{t("Organization Growth")}</SelectItem>
+              <SelectItem value="usage">{t("Service Usage")}</SelectItem>
+              <SelectItem value="subscriptions">{t("Subscription Tiers")}</SelectItem>
+            </SelectContent>
+          </Select>
         </div>
         <TabsContent value="growth">
-          <GrowthChart data={organizations} color="#8b5cf6" title="Organizations" />
+          <GrowthChart data={organizations} color="#8b5cf6" title={t("Organizations")} />
         </TabsContent>
         <TabsContent value="usage">
           <div className="flex items-center gap-1 bg-neutral-100 dark:bg-neutral-800 p-1 rounded-lg">
@@ -115,13 +129,13 @@ export function Organizations() {
               onClick={() => setTimePeriod("all")}
               className="h-7 text-xs"
             >
-              All Time
+              {t("All Time")}
             </Button>
           </div>
           <ServiceUsageChart
             startDate={startDate}
             endDate={endDate}
-            title={`Service-wide Usage - ${timePeriod === "all" ? "All Time" : `Last ${timePeriod}`}`}
+            title={timePeriod === "all" ? t("Service-wide Usage - All Time") : t("Service-wide Usage - Last {timePeriod}", { timePeriod })}
           />
         </TabsContent>
         <TabsContent value="subscriptions">
@@ -129,12 +143,9 @@ export function Organizations() {
         </TabsContent>
       </Tabs>
       <div className="space-y-2">
-        <SearchInput
-          placeholder="Search by name, slug, domain, or member email..."
-          value={searchQuery}
-          onChange={setSearchQuery}
-        />
         <OrganizationFilters
+          searchQuery={searchQuery}
+          setSearchQuery={setSearchQuery}
           showZeroEvents={showZeroEvents}
           setShowZeroEvents={setShowZeroEvents}
           showOnlyOverLimit={showOnlyOverLimit}
@@ -160,7 +171,7 @@ export function Organizations() {
           }}
         >
           <DownloadIcon className="w-4 h-4" />
-          Export
+          {t("Export")}
         </Button>
         <OrganizationsTable
           organizations={filteredOrganizations}
