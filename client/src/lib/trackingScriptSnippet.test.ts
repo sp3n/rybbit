@@ -26,7 +26,6 @@ describe("trackingScriptSnippet", () => {
 
     expect(attributes).toMatchObject({
       "data-site-id": "site_abc",
-      "data-config-mode": "inline",
       "data-session-replay": "true",
       "data-web-vitals": "true",
       "data-track-errors": "true",
@@ -48,7 +47,6 @@ describe("trackingScriptSnippet", () => {
       { debounceValue: 750, skipPatterns: ["/admin/**"], maskPatterns: ["/orders/**"] }
     );
 
-    expect(snippet).toContain('data-config-mode="inline"');
     expect(snippet).toContain('data-debounce="750"');
     expect(snippet).toContain("data-skip-patterns='[\"/admin/**\"]'");
     expect(snippet).toContain("data-mask-patterns='[\"/orders/**\"]'");

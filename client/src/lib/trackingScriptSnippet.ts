@@ -48,9 +48,6 @@ export function getTrackingScriptDataAttributes(
   const siteId = siteConfig.id ?? siteConfig.siteId;
   const attributes: TrackingScriptAttribute[] = [
     ["data-site-id", String(siteId)],
-    // This fork deliberately embeds the site settings in the snippet so the
-    // tracker does not need a separate /site/tracking-config request.
-    ["data-config-mode", "inline"],
     ...booleanAttributes.map(
       ([key, attributeName, defaultValue]) =>
         [attributeName, String(siteConfig[key] ?? defaultValue)] as TrackingScriptAttribute
