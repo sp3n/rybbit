@@ -1,5 +1,6 @@
 // Organization Management
 export { addUserToOrganization } from "./addUserToOrganization.js";
+export { createUserInOrganization } from "./createUserInOrganization.js";
 export { getUserOrganizations } from "./getUserOrganizations.js";
 export { getMyOrganizations } from "./getMyOrganizations.js";
 export { listOrganizationMembers } from "./listOrganizationMembers.js";
@@ -10,4 +11,6 @@ export { unsubscribeMarketing, oneClickUnsubscribeMarketing } from "./unsubscrib
 
 // API Keys
 export { createUserApiKey } from "./createApiKey.js";
+export { createOrgApiKey } from "./createOrgApiKey.js";
+export { getOrgApiUsage } from "./getOrgApiUsage.js";
 

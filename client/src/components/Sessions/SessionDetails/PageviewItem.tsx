@@ -7,7 +7,7 @@ import Link from "next/link";
 
 import { useExtracted } from "next-intl";
 import { SessionEvent } from "../../../api/analytics/endpoints";
-import { getEventDisplayName, PROPS_TO_HIDE } from "../../../lib/events";
+import { PROPS_TO_HIDE, useEventDisplayName } from "../../../lib/events";
 import { useDateTimeFormat } from "../../../hooks/useDateTimeFormat";
 import { formatDuration } from "../../../lib/dateTimeUtils";
 import { cn } from "../../../lib/utils";
@@ -170,6 +170,7 @@ export function PageviewItem({
   highlightedEventTimestamp,
 }: PageviewItemProps) {
   const t = useExtracted();
+  const getEventDisplayName = useEventDisplayName();
   const { hour12 } = useDateTimeFormat();
   const isPageview = item.type === "pageview";
   const isOutbound = item.type === "outbound";
@@ -219,7 +220,7 @@ export function PageviewItem({
         </div>
       </div>
 
-      <div className="flex flex-col ml-3 flex-1">
+      <div className="flex flex-col ml-3 flex-1 min-w-0">
         <div className="flex items-center flex-1 py-1">
           <div className="shrink-0 mr-3">
             <EventTypeIcon type={item.type} />
@@ -235,9 +236,6 @@ export function PageviewItem({
                 <div
                   className="text-sm truncate hover:underline "
                   title={item.pathname}
-                  style={{
-                    maxWidth: "calc(min(100vw, 1150px) - 250px)",
-                  }}
                 >
                   {showHostname && item.hostname}
                   {item.pathname}
@@ -257,15 +255,12 @@ export function PageviewItem({
                 <div
                   className="text-sm truncate hover:underline"
                   title={String(item.props.url)}
-                  style={{
-                    maxWidth: "calc(min(100vw, 1150px) - 250px)",
-                  }}
                 >
                   {String(item.props.url)}
                 </div>
               </Link>
             ) : (
-              <div className="text-sm truncate">{getEventDisplayName(item, t)}</div>
+              <div className="text-sm truncate">{getEventDisplayName(item)}</div>
             )}
           </div>
 

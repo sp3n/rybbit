@@ -10,6 +10,12 @@ export async function proxy(request: NextRequest) {
     return NextResponse.next();
   }
 
+  // Embed widget routes — hex public site ids are 12 chars and would otherwise
+  // match the private-key pattern below (/widget/<hexId>).
+  if (path.startsWith("/widget/")) {
+    return NextResponse.next();
+  }
+
   // Handle GitHub OAuth callback redirect
   if (path.includes("/auth/callback/github") || path.includes("/auth/callback/google")) {
     const redirectUrl = new URL(`/api${path}${request.nextUrl.search}`, request.url);
@@ -37,19 +43,20 @@ export async function proxy(request: NextRequest) {
       "admin",
       "organization",
       "account",
-      "uptime",
       "settings",
       "rollup",
       "as",
       "_next",
       "api",
+      "widget",
     ];
     if (excludedRoutes.includes(siteId)) {
       return NextResponse.next();
     }
 
     // Add cache control headers to make sure the redirect isn't cached
-    const response = NextResponse.redirect(new URL(`/${siteId}/main`, request.url));
+    url.pathname = `/${siteId}/main`;
+    const response = NextResponse.redirect(url);
     response.headers.set("Cache-Control", "no-store, max-age=0");
     return response;
   }
@@ -62,7 +69,8 @@ export async function proxy(request: NextRequest) {
     const siteAndKey = privateKeyMatch[1]; // e.g., "123/abc123def456"
 
     // Redirect to /main while preserving the private key in the path
-    const response = NextResponse.redirect(new URL(`/${siteAndKey}/main`, request.url));
+    url.pathname = `/${siteAndKey}/main`;
+    const response = NextResponse.redirect(url);
     response.headers.set("Cache-Control", "no-store, max-age=0");
     return response;
   }

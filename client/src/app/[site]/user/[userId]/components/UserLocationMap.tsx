@@ -2,37 +2,42 @@
 
 import mapboxgl from "mapbox-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
-import { useEffect, useRef, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { useEffect, useRef } from "react";
 import { useTheme } from "next-themes";
+import { cn } from "../../../../../lib/utils";
+import { Skeleton } from "../../../../../components/ui/skeleton";
 import { useConfigs } from "../../../../../lib/configs";
 
 interface UserLocationMapProps {
   country: string;
   region: string;
   city: string;
+  className?: string;
 }
 
-export function UserLocationMap({ country, region, city }: UserLocationMapProps) {
+export function UserLocationMap({ country, region, city, className }: UserLocationMapProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<mapboxgl.Map | null>(null);
   const markerRef = useRef<mapboxgl.Marker | null>(null);
   const { configs } = useConfigs();
   const { resolvedTheme } = useTheme();
-  const [error, setError] = useState(false);
 
-  const style =
-    resolvedTheme === "dark"
-      ? "mapbox://styles/mapbox/dark-v11"
-      : "mapbox://styles/mapbox/light-v11";
+  const query = [city, region, country].filter(Boolean).join(", ");
+
+  const style = resolvedTheme === "dark" ? "mapbox://styles/mapbox/dark-v11" : "mapbox://styles/mapbox/light-v11";
+
+  const { data: coordinates, isLoading } = useQuery({
+    queryKey: ["user-location-geocode", configs?.mapboxToken, query],
+    queryFn: () => geocodeUserLocation(configs!.mapboxToken, query),
+    enabled: Boolean(configs?.mapboxToken && query),
+    staleTime: 24 * 60 * 60 * 1000,
+    retry: false,
+    refetchOnWindowFocus: false,
+  });
 
   useEffect(() => {
-    if (!containerRef.current || !configs?.mapboxToken) return;
-
-    const query = [city, region, country].filter(Boolean).join(", ");
-    if (!query) {
-      setError(true);
-      return;
-    }
+    if (!containerRef.current || !configs?.mapboxToken || !coordinates) return;
 
     // Clean up previous map instance before creating a new one
     markerRef.current?.remove();
@@ -42,37 +47,23 @@ export function UserLocationMap({ country, region, city }: UserLocationMapProps)
 
     mapboxgl.accessToken = configs.mapboxToken;
 
-    fetch(
-      `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodeURIComponent(query)}.json?access_token=${configs.mapboxToken}&limit=1`
-    )
-      .then(res => res.json())
-      .then(data => {
-        if (!data.features?.length || !containerRef.current) {
-          setError(true);
-          return;
-        }
+    const map = new mapboxgl.Map({
+      container: containerRef.current,
+      style,
+      center: coordinates,
+      zoom: 4,
+      pitch: 0,
+      bearing: 0,
+      antialias: true,
+      attributionControl: false,
+      // Static locator: panning/zooming a thumbnail this small only steals the
+      // page's scroll wheel
+      interactive: false,
+    });
 
-        const [lng, lat] = data.features[0].center;
+    mapRef.current = map;
 
-        const map = new mapboxgl.Map({
-          container: containerRef.current,
-          style,
-          center: [lng, lat],
-          zoom: 1,
-          pitch: 0,
-          bearing: 0,
-          antialias: true,
-          attributionControl: false,
-          interactive: true,
-        });
-
-        mapRef.current = map;
-
-        markerRef.current = new mapboxgl.Marker({ color: "#10b981" })
-          .setLngLat([lng, lat])
-          .addTo(map);
-      })
-      .catch(() => setError(true));
+    markerRef.current = new mapboxgl.Marker({ color: "#10b981" }).setLngLat(coordinates).addTo(map);
 
     return () => {
       markerRef.current?.remove();
@@ -80,14 +71,57 @@ export function UserLocationMap({ country, region, city }: UserLocationMapProps)
       mapRef.current?.remove();
       mapRef.current = null;
     };
-  }, [configs?.mapboxToken, country, region, city, style]);
+  }, [configs?.mapboxToken, coordinates, style]);
 
-  if (error) return null;
+  if (!query) return null;
+
+  // Reserve the slot while geocoding so the card doesn't jump
+  if (isLoading) return <Skeleton className={cn("w-full rounded-md", className)} />;
+
+  // Geocoding failed: drop the section instead of framing an empty box
+  if (!coordinates) return null;
 
   return (
     <div
       ref={containerRef}
-      className="w-full h-full rounded-md overflow-hidden [&_.mapboxgl-ctrl-bottom-left]:hidden! [&_.mapboxgl-ctrl-logo]:hidden! [&_.mapboxgl-ctrl-bottom-right]:hidden!"
+      className={cn(
+        "w-full overflow-hidden rounded-md border border-neutral-100 dark:border-neutral-800",
+        "[&_.mapboxgl-ctrl-bottom-left]:hidden! [&_.mapboxgl-ctrl-logo]:hidden! [&_.mapboxgl-ctrl-bottom-right]:hidden!",
+        className
+      )}
     />
   );
+}
+
+interface MapboxGeocodingResponse {
+  features?: Array<{
+    center?: unknown;
+  }>;
+}
+
+async function geocodeUserLocation(token: string, query: string): Promise<[number, number] | null> {
+  try {
+    const params = new URLSearchParams({
+      access_token: token,
+      limit: "1",
+    });
+
+    const response = await fetch(
+      `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodeURIComponent(query)}.json?${params}`
+    );
+
+    if (!response.ok) return null;
+
+    const data = (await response.json()) as MapboxGeocodingResponse;
+    const center = data.features?.[0]?.center;
+
+    if (!Array.isArray(center) || center.length < 2) return null;
+
+    const [lng, lat] = center;
+    if (typeof lng !== "number" || typeof lat !== "number") return null;
+
+    return [lng, lat];
+  } catch {
+    return null;
+  }
 }

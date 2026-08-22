@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM node:20-alpine AS builder
+FROM node:24-alpine AS builder
 
 WORKDIR /app
 
@@ -17,11 +17,20 @@ RUN npm ci --legacy-peer-deps
 # Copy server source code
 COPY server/ .
 
+# npm installs the file:../shared dependency as a relative symlink
+# (node_modules/@rybbit/shared -> ../../../shared). The runtime stage re-homes
+# node_modules from /app/server to /app, which leaves that link pointing at
+# /shared — outside the image. Materialize it into a real directory so the
+# copied node_modules is location-independent.
+RUN rm -rf node_modules/@rybbit/shared \
+ && mkdir -p node_modules/@rybbit/shared \
+ && cp -r /app/shared/package.json /app/shared/dist node_modules/@rybbit/shared/
+
 # Build the application
 RUN npm run build
 
 # Runtime image
-FROM node:20-alpine
+FROM node:24-alpine
 
 WORKDIR /app
 
@@ -42,6 +51,7 @@ ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
 # Copy built application and dependencies
 COPY --from=builder /app/server/package*.json ./
 COPY --from=builder /app/server/GeoLite2-City.mmdb ./GeoLite2-City.mmdb
+COPY --from=builder /app/server/GeoLite2-ASN.mmdb ./GeoLite2-ASN.mmdb
 COPY --from=builder /app/server/dist ./dist
 COPY --from=builder /app/server/node_modules ./node_modules
 COPY --from=builder /app/server/docker-entrypoint.sh /docker-entrypoint.sh
@@ -49,10 +59,10 @@ COPY --from=builder /app/server/drizzle.config.ts ./drizzle.config.ts
 COPY --from=builder /app/server/drizzle ./drizzle
 COPY --from=builder /app/server/public ./public
 COPY --from=builder /app/server/src ./src
-COPY --from=builder /app/shared ./shared
 
-# Make the entrypoint executable
-RUN chmod +x /docker-entrypoint.sh
+# Windows checkouts may copy this script with CRLF, which makes Linux resolve
+# the shebang as `/bin/sh\r` and fail with "no such file or directory".
+RUN sed -i 's/\r$//' /docker-entrypoint.sh && chmod +x /docker-entrypoint.sh
 
 # Expose the API port
 EXPOSE 3001

@@ -1,9 +1,9 @@
 import { FilterParameter } from "@rybbit/shared";
 import { useQueries } from "@tanstack/react-query";
 import { useMemo } from "react";
-import { fetchMetric, MetricResponse } from "@/api/analytics/endpoints";
-import { buildApiParams } from "@/api/utils";
-import { useStore } from "@/lib/store";
+import { buildAnalyticsRequest, fetchAnalytics } from "@/api/analytics/analyticsRequest";
+import { MetricResponse } from "@/api/analytics/endpoints";
+import { useAnalyticsContext } from "@/api/analytics/useAnalyticsQuery";
 
 export type RollupMetricRow = MetricResponse;
 
@@ -18,27 +18,23 @@ export function useRollupMetric({
   siteIds,
   parameter,
   limit = 100,
+  lite = false,
 }: {
   siteIds: number[];
   parameter: FilterParameter;
   limit?: number;
+  lite?: boolean;
 }): UseRollupMetricResult {
-  const { time, filters, timezone } = useStore();
-  const params = buildApiParams(time, { filters });
+  const { context } = useAnalyticsContext({ useFilters: !lite });
+  const request = buildAnalyticsRequest(
+    { path: lite ? "metric-lite" : "metric", params: { parameter, limit, page: 1 } },
+    context
+  );
 
   const queries = useQueries({
     queries: siteIds.map((siteId) => ({
-      queryKey: [
-        "rollup-metric",
-        parameter,
-        siteId,
-        time,
-        filters,
-        limit,
-        timezone,
-      ],
-      queryFn: () =>
-        fetchMetric(siteId, { ...params, parameter, limit, page: 1 }),
+      queryKey: ["rollup-metric", siteId, request.path, request.params],
+      queryFn: () => fetchAnalytics<{ data: MetricResponse[]; totalCount: number }>(siteId, request),
       staleTime: 60_000,
     })),
   });

@@ -1,9 +1,13 @@
 import { useWhiteLabel } from "../../hooks/useIsWhiteLabel";
 
-export function Footer() {
+interface FooterProps {
+  disabled?: boolean;
+}
+
+export function Footer({ disabled = false }: FooterProps) {
   const APP_VERSION = process.env.NEXT_PUBLIC_APP_VERSION;
   const { isWhiteLabel } = useWhiteLabel();
-  if (isWhiteLabel) {
+  if (disabled || isWhiteLabel) {
     return null;
   }
 

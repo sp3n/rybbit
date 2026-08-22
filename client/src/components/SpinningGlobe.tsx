@@ -1,12 +1,15 @@
 "use client";
 
-import { isNil, round, throttle } from "lodash";
+import isNil from "lodash/isNil";
+import round from "lodash/round";
+import throttle from "lodash/throttle";
 import mapboxgl from "mapbox-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
 import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import type { GetSessionsResponse } from "../api/analytics/endpoints";
 import { useConfigs } from "../lib/configs";
+import { frogAvatarSVG } from "../lib/frogAvatar";
 import "../app/[site]/globe/globe.css";
 
 // Constants
@@ -20,23 +23,6 @@ const MIN_CLUSTER_SIZE = 20;
 const CLUSTERING_THRESHOLD = 500;
 const SPREAD_START_ZOOM = 8;
 const SPREAD_RADIUS_DEGREES = 0.006;
-
-// Import avatar generation
-import BoringAvatar from "boring-avatars";
-import { createElement } from "react";
-// @ts-ignore - React 19 has built-in types
-import { renderToStaticMarkup } from "react-dom/server";
-import { AVATAR_COLORS } from "./Avatar";
-
-function generateAvatarSVG(userId: string, size: number): string {
-  const avatarElement = createElement(BoringAvatar, {
-    size,
-    name: userId,
-    variant: "beam",
-    colors: AVATAR_COLORS,
-  });
-  return renderToStaticMarkup(avatarElement);
-}
 
 // Hash function for deterministic spreading
 function hashStringToNumber(str: string): number {
@@ -178,7 +164,67 @@ export function SpinningGlobe() {
 
     mapRef.current = map;
 
-    map.on("style.load", () => {
+    // Spin globe function using easeTo for smooth animation
+    const spinGlobe = () => {
+      if (!mapRef.current) return;
+      const zoom = mapRef.current.getZoom();
+      if (!isUserInteractingRef.current && zoom < MAX_SPIN_ZOOM) {
+        let distancePerSecond = 360 / SECONDS_PER_REVOLUTION;
+        if (zoom > SLOW_SPIN_ZOOM) {
+          // Slow spinning at higher zooms
+          const zoomDif = (MAX_SPIN_ZOOM - zoom) / (MAX_SPIN_ZOOM - SLOW_SPIN_ZOOM);
+          distancePerSecond *= zoomDif;
+        }
+        const center = mapRef.current.getCenter();
+        center.lng -= distancePerSecond;
+        // Smoothly animate the map over one second
+        mapRef.current.easeTo({ center, duration: 1000, easing: n => n });
+      }
+    };
+
+    const handleClusterClick = (e: mapboxgl.MapLayerMouseEvent) => {
+      const features = map.queryRenderedFeatures(e.point, { layers: [CLUSTER_LAYER_ID] });
+      if (!features.length) return;
+
+      const clusterId = features[0].properties?.cluster_id;
+      const source = map.getSource(SOURCE_ID) as mapboxgl.GeoJSONSource;
+
+      source.getClusterExpansionZoom(clusterId, (err, zoom) => {
+        if (err || !zoom) return;
+        const coordinates = (features[0].geometry as any).coordinates;
+        map.easeTo({ center: coordinates, zoom, duration: 500 });
+      });
+    };
+
+    const setCursor = (cursor: string) => {
+      const canvas = map.getCanvas() as HTMLCanvasElement | undefined;
+      if (canvas) {
+        canvas.style.cursor = cursor;
+      }
+    };
+
+    const handleClusterMouseEnter = () => {
+      setCursor("pointer");
+    };
+
+    const handleClusterMouseLeave = () => {
+      setCursor("");
+    };
+
+    const handleMouseDown = () => {
+      isUserInteractingRef.current = true;
+    };
+
+    const handleInteractionEnd = () => {
+      isUserInteractingRef.current = false;
+      spinGlobe();
+    };
+
+    const handleMoveEnd = () => {
+      spinGlobe();
+    };
+
+    const handleStyleLoad = () => {
       // Apply custom styling
       try {
         if (map.getLayer("water")) {
@@ -252,81 +298,43 @@ export function SpinningGlobe() {
       });
 
       // Cluster click handler
-      map.on("click", CLUSTER_LAYER_ID, e => {
-        const features = map.queryRenderedFeatures(e.point, { layers: [CLUSTER_LAYER_ID] });
-        if (!features.length) return;
-
-        const clusterId = features[0].properties?.cluster_id;
-        const source = map.getSource(SOURCE_ID) as mapboxgl.GeoJSONSource;
-
-        source.getClusterExpansionZoom(clusterId, (err, zoom) => {
-          if (err || !zoom) return;
-          const coordinates = (features[0].geometry as any).coordinates;
-          map.easeTo({ center: coordinates, zoom, duration: 500 });
-        });
-      });
+      map.on("click", CLUSTER_LAYER_ID, handleClusterClick);
 
       // Cursor change on cluster hover
-      map.on("mouseenter", CLUSTER_LAYER_ID, () => {
-        map.getCanvas().style.cursor = "pointer";
-      });
-      map.on("mouseleave", CLUSTER_LAYER_ID, () => {
-        map.getCanvas().style.cursor = "";
-      });
-
-      // Spin globe function using easeTo for smooth animation
-      const spinGlobe = () => {
-        if (!mapRef.current) return;
-        const zoom = mapRef.current.getZoom();
-        if (!isUserInteractingRef.current && zoom < MAX_SPIN_ZOOM) {
-          let distancePerSecond = 360 / SECONDS_PER_REVOLUTION;
-          if (zoom > SLOW_SPIN_ZOOM) {
-            // Slow spinning at higher zooms
-            const zoomDif = (MAX_SPIN_ZOOM - zoom) / (MAX_SPIN_ZOOM - SLOW_SPIN_ZOOM);
-            distancePerSecond *= zoomDif;
-          }
-          const center = mapRef.current.getCenter();
-          center.lng -= distancePerSecond;
-          // Smoothly animate the map over one second
-          mapRef.current.easeTo({ center, duration: 1000, easing: n => n });
-        }
-      };
+      map.on("mouseenter", CLUSTER_LAYER_ID, handleClusterMouseEnter);
+      map.on("mouseleave", CLUSTER_LAYER_ID, handleClusterMouseLeave);
 
       // Pause spinning on interaction
-      map.on("mousedown", () => {
-        isUserInteractingRef.current = true;
-      });
+      map.on("mousedown", handleMouseDown);
 
       // Restart spinning after interaction ends
-      map.on("mouseup", () => {
-        isUserInteractingRef.current = false;
-        spinGlobe();
-      });
-      map.on("dragend", () => {
-        isUserInteractingRef.current = false;
-        spinGlobe();
-      });
-      map.on("pitchend", () => {
-        isUserInteractingRef.current = false;
-        spinGlobe();
-      });
-      map.on("rotateend", () => {
-        isUserInteractingRef.current = false;
-        spinGlobe();
-      });
+      map.on("mouseup", handleInteractionEnd);
+      map.on("dragend", handleInteractionEnd);
+      map.on("pitchend", handleInteractionEnd);
+      map.on("rotateend", handleInteractionEnd);
 
       // When animation completes, spin again (creates continuous rotation)
-      map.on("moveend", () => {
-        spinGlobe();
-      });
+      map.on("moveend", handleMoveEnd);
 
       setMapLoaded(true);
 
       // Start spinning
       spinGlobe();
-    });
+    };
+
+    map.on("style.load", handleStyleLoad);
 
     return () => {
+      map.off("style.load", handleStyleLoad);
+      map.off("click", CLUSTER_LAYER_ID, handleClusterClick);
+      map.off("mouseenter", CLUSTER_LAYER_ID, handleClusterMouseEnter);
+      map.off("mouseleave", CLUSTER_LAYER_ID, handleClusterMouseLeave);
+      map.off("mousedown", handleMouseDown);
+      map.off("mouseup", handleInteractionEnd);
+      map.off("dragend", handleInteractionEnd);
+      map.off("pitchend", handleInteractionEnd);
+      map.off("rotateend", handleInteractionEnd);
+      map.off("moveend", handleMoveEnd);
       // Clear markers
       markersMapRef.current.forEach(({ marker }) => marker.remove());
       markersMapRef.current.clear();
@@ -429,7 +437,12 @@ export function SpinningGlobe() {
       }
 
       // Build set of current session IDs
-      const currentSessionIds = new Set(unclusteredFeatures.map(f => f.properties?.session_id).filter(Boolean));
+      const currentSessionIds = new Set(
+        unclusteredFeatures.flatMap(f => {
+          const sessionId = f.properties?.session_id;
+          return sessionId ? [sessionId] : [];
+        })
+      );
 
       // Remove markers no longer visible
       const toRemove: string[] = [];
@@ -458,13 +471,9 @@ export function SpinningGlobe() {
           // Create avatar marker
           const avatarContainer = document.createElement("div");
           avatarContainer.className = "timeline-avatar-marker";
-          avatarContainer.style.cursor = "pointer";
-          avatarContainer.style.borderRadius = "50%";
-          avatarContainer.style.overflow = "hidden";
-          avatarContainer.style.width = "32px";
-          avatarContainer.style.height = "32px";
-          avatarContainer.style.boxShadow = "0 2px 8px rgba(0,0,0,0.3)";
-          avatarContainer.innerHTML = generateAvatarSVG(session.user_id, 32);
+          avatarContainer.style.cssText =
+            "cursor: pointer; border-radius: 50%; overflow: hidden; width: 32px; height: 32px; box-shadow: 0 2px 8px rgba(0,0,0,0.3);";
+          avatarContainer.innerHTML = frogAvatarSVG(session.user_id, 32);
 
           const marker = new mapboxgl.Marker({
             element: avatarContainer,

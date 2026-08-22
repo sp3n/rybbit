@@ -4,9 +4,9 @@ import type { Metadata } from "next";
 import { createOGImageUrl } from "@/lib/metadata";
 
 export const metadata: Metadata = {
-  title: "Rybbit vs Cloudflare Analytics: Full-Featured Alternative",
+  title: "Rybbit: The Full-Featured Cloudflare Analytics Alternative",
   description:
-    "Compare Rybbit and Cloudflare Web Analytics. While Cloudflare is free and basic, Rybbit offers advanced features like session replay, funnels, and custom events.",
+    "Looking for a Cloudflare Web Analytics alternative? Rybbit adds session replay, funnels, custom events, and real referrer data, with a free tier included.",
   openGraph: {
     title: "Rybbit vs Cloudflare Analytics: Basic vs Full-Featured",
     description: "Cloudflare is free but limited. Rybbit offers the full analytics experience. Compare features.",
@@ -72,7 +72,7 @@ const structuredData = {
           name: "How long does Cloudflare keep my data?",
           acceptedAnswer: {
             "@type": "Answer",
-            text: "Cloudflare retains analytics data for only 6 months. Rybbit retains data for 2-5+ years depending on your plan, and you can export your data at any time.",
+            text: "Cloudflare retains analytics data for only 6 months. Rybbit retains data for 3-5+ years depending on your plan, and you can export your data at any time.",
           },
         },
         {
@@ -102,6 +102,7 @@ export default function CloudflareAnalytics() {
         chooseCompetitor={cloudflareAnalyticsExtendedData.chooseCompetitor}
         rybbitPricing={cloudflareAnalyticsExtendedData.rybbitPricing}
         competitorPricing={cloudflareAnalyticsExtendedData.competitorPricing}
+        deepDive={cloudflareAnalyticsExtendedData.deepDive}
         faqItems={cloudflareAnalyticsExtendedData.faqItems}
         relatedResources={cloudflareAnalyticsExtendedData.relatedResources}
       />

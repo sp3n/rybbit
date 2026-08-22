@@ -48,4 +48,12 @@ coverage/
 
 .claude/
 
+.codex/
+
 .agents/
+
+.deepsec/
+
+.github/
+
+.impeccable/critique

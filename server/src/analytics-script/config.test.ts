@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { parseScriptConfig } from "./config.js";
 
-// Mock fetch globally to make sure config parsing stays self-contained.
+// Mock fetch globally
 global.fetch = vi.fn();
 
 describe("parseScriptConfig", () => {
@@ -13,6 +13,7 @@ describe("parseScriptConfig", () => {
     mockScriptTag = document.createElement("script");
     consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    localStorage.clear();
     vi.clearAllMocks();
   });
 
@@ -21,13 +22,41 @@ describe("parseScriptConfig", () => {
     consoleWarnSpy.mockRestore();
   });
 
-  it("should parse valid configuration from script attributes", async () => {
+  it("should parse valid configuration with API response", async () => {
     mockScriptTag.setAttribute("src", "https://analytics.example.com/script.js");
     mockScriptTag.setAttribute("data-site-id", "123");
-    mockScriptTag.setAttribute("data-session-replay", "true");
-    mockScriptTag.setAttribute("data-web-vitals", "true");
-    mockScriptTag.setAttribute("data-track-url-params", "false");
-    mockScriptTag.setAttribute("data-track-spa-navigation", "false");
+
+    // Mock successful API response
+    (global.fetch as any)
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          featureFlagsEnabled: true,
+          sessionReplay: true,
+          webVitals: true,
+          trackErrors: false,
+          trackOutbound: true,
+          trackUrlParams: false,
+          trackInitialPageView: true,
+          trackSpaNavigation: false,
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          flags: {
+            new_checkout: {
+              key: "new_checkout",
+              value: true,
+              flagType: "boolean",
+              version: 1,
+              reason: "rollout",
+              matched: true,
+              rolloutPercentage: 100,
+            },
+          },
+        }),
+      });
 
     const config = await parseScriptConfig(mockScriptTag);
 
@@ -35,18 +64,31 @@ describe("parseScriptConfig", () => {
       namespace: "rybbit",
       analyticsHost: "https://analytics.example.com",
       siteId: "123",
+      visitorId: expect.any(String),
       debounceDuration: 500,
-      autoTrackPageview: true,
-      autoTrackSpa: false,
-      trackQuerystring: false,
-      trackOutbound: true,
-      enableWebVitals: true,
-      trackErrors: false,
-      enableSessionReplay: true,
+      autoTrackPageview: true, // trackInitialPageView from API
+      autoTrackSpa: false, // trackSpaNavigation from API
+      trackQuerystring: false, // trackUrlParams from API
+      trackOutbound: true, // trackOutbound from API
+      enableWebVitals: true, // webVitals from API
+      trackErrors: false, // trackErrors from API
+      enableSessionReplay: true, // sessionReplay from API
       trackButtonClicks: false,
       trackCopy: false,
       trackFormInteractions: false,
       tag: "",
+      featureFlagsEnabled: true,
+      featureFlags: {
+        new_checkout: {
+          key: "new_checkout",
+          value: true,
+          flagType: "boolean",
+          version: 1,
+          reason: "rollout",
+          matched: true,
+          rolloutPercentage: 100,
+        },
+      },
       skipPatterns: [],
       maskPatterns: [],
       sessionReplayBatchInterval: 5000,
@@ -66,12 +108,117 @@ describe("parseScriptConfig", () => {
       sessionReplaySampleRate: undefined,
     });
 
-    expect(global.fetch).not.toHaveBeenCalled();
+    expect(global.fetch).toHaveBeenCalledWith("https://analytics.example.com/site/tracking-config/123", {
+      method: "GET",
+      credentials: "omit",
+    });
   });
 
-  it("should use defaults without fetching API config", async () => {
+  it("should not request feature flag evaluation when the site has no flags", async () => {
     mockScriptTag.setAttribute("src", "https://analytics.example.com/script.js");
     mockScriptTag.setAttribute("data-site-id", "123");
+
+    (global.fetch as any).mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ featureFlagsEnabled: false }),
+    });
+
+    const config = await parseScriptConfig(mockScriptTag);
+
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    expect(config?.featureFlagsEnabled).toBe(false);
+    expect(config?.featureFlags).toEqual({});
+  });
+
+  it("uses explicit inline settings without requesting tracking config", async () => {
+    mockScriptTag.setAttribute("src", "https://analytics.example.com/script.js");
+    mockScriptTag.setAttribute("data-site-id", "123");
+    mockScriptTag.setAttribute("data-config-mode", "inline");
+    mockScriptTag.setAttribute("data-session-replay", "true");
+    mockScriptTag.setAttribute("data-web-vitals", "true");
+    mockScriptTag.setAttribute("data-track-errors", "true");
+    mockScriptTag.setAttribute("data-track-outbound", "false");
+    mockScriptTag.setAttribute("data-track-url-params", "false");
+    mockScriptTag.setAttribute("data-track-initial-pageview", "false");
+    mockScriptTag.setAttribute("data-track-spa-navigation", "false");
+    mockScriptTag.setAttribute("data-track-button-clicks", "true");
+    mockScriptTag.setAttribute("data-track-copy", "true");
+    mockScriptTag.setAttribute("data-track-form-interactions", "true");
+    mockScriptTag.setAttribute("data-feature-flags-enabled", "false");
+
+    const config = await parseScriptConfig(mockScriptTag);
+
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(config).toMatchObject({
+      enableSessionReplay: true,
+      enableWebVitals: true,
+      trackErrors: true,
+      trackOutbound: false,
+      trackQuerystring: false,
+      autoTrackPageview: false,
+      autoTrackSpa: false,
+      trackButtonClicks: true,
+      trackCopy: true,
+      trackFormInteractions: true,
+      featureFlagsEnabled: false,
+    });
+  });
+
+  it("keeps legacy full-settings snippets request-free", async () => {
+    mockScriptTag.setAttribute("src", "https://analytics.example.com/script.js");
+    mockScriptTag.setAttribute("data-site-id", "123");
+    for (const attribute of [
+      "data-session-replay",
+      "data-web-vitals",
+      "data-track-errors",
+      "data-track-outbound",
+      "data-track-url-params",
+      "data-track-initial-pageview",
+      "data-track-spa-navigation",
+      "data-track-button-clicks",
+      "data-track-copy",
+      "data-track-form-interactions",
+    ]) {
+      mockScriptTag.setAttribute(attribute, "false");
+    }
+
+    const config = await parseScriptConfig(mockScriptTag);
+
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(config?.autoTrackPageview).toBe(false);
+    expect(config?.enableSessionReplay).toBe(false);
+  });
+
+  it("stops future evaluation when flags are deleted between configuration and evaluation", async () => {
+    mockScriptTag.setAttribute("src", "https://analytics.example.com/script.js");
+    mockScriptTag.setAttribute("data-site-id", "123");
+
+    (global.fetch as any)
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ featureFlagsEnabled: true }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ featureFlagsEnabled: false, flags: {} }),
+      });
+
+    const config = await parseScriptConfig(mockScriptTag);
+
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+    expect(config?.featureFlagsEnabled).toBe(false);
+    expect(config?.featureFlags).toEqual({});
+  });
+
+  it("should use defaults when API call fails", async () => {
+    mockScriptTag.setAttribute("src", "https://analytics.example.com/script.js");
+    mockScriptTag.setAttribute("data-site-id", "123");
+
+    // Mock failed API response
+    (global.fetch as any).mockResolvedValueOnce({
+      ok: false,
+      status: 404,
+    });
 
     const config = await parseScriptConfig(mockScriptTag);
 
@@ -79,6 +226,7 @@ describe("parseScriptConfig", () => {
       namespace: "rybbit",
       analyticsHost: "https://analytics.example.com",
       siteId: "123",
+      visitorId: expect.any(String),
       debounceDuration: 500,
       autoTrackPageview: true,
       autoTrackSpa: true,
@@ -91,6 +239,8 @@ describe("parseScriptConfig", () => {
       trackCopy: false,
       trackFormInteractions: false,
       tag: "",
+      featureFlagsEnabled: false,
+      featureFlags: {},
       skipPatterns: [],
       maskPatterns: [],
       sessionReplayBatchInterval: 5000,
@@ -109,11 +259,10 @@ describe("parseScriptConfig", () => {
       sessionReplaySampleRate: undefined,
     });
 
-    expect(global.fetch).not.toHaveBeenCalled();
-    expect(consoleWarnSpy).not.toHaveBeenCalled();
+    expect(consoleWarnSpy).toHaveBeenCalledWith("Failed to fetch tracking config from API, using defaults");
   });
 
-  it("should not fetch API config even when fetch would fail", async () => {
+  it("should use defaults when network error occurs", async () => {
     mockScriptTag.setAttribute("src", "https://analytics.example.com/script.js");
     mockScriptTag.setAttribute("data-site-id", "123");
 
@@ -126,6 +275,7 @@ describe("parseScriptConfig", () => {
       namespace: "rybbit",
       analyticsHost: "https://analytics.example.com",
       siteId: "123",
+      visitorId: expect.any(String),
       debounceDuration: 500,
       autoTrackPageview: true,
       autoTrackSpa: true,
@@ -138,6 +288,8 @@ describe("parseScriptConfig", () => {
       trackCopy: false,
       trackFormInteractions: false,
       tag: "",
+      featureFlagsEnabled: false,
+      featureFlags: {},
       skipPatterns: [],
       maskPatterns: [],
       sessionReplayBatchInterval: 5000,
@@ -156,8 +308,7 @@ describe("parseScriptConfig", () => {
       sessionReplaySampleRate: undefined,
     });
 
-    expect(global.fetch).not.toHaveBeenCalled();
-    expect(consoleWarnSpy).not.toHaveBeenCalled();
+    expect(consoleWarnSpy).toHaveBeenCalledWith("Error fetching tracking config:", expect.any(Error));
   });
 
   it("should handle missing src attribute", async () => {
@@ -232,32 +383,37 @@ describe("parseScriptConfig", () => {
     expect(config?.debounceDuration).toBe(0);
   });
 
-  it("should parse tracking feature flags from data attributes", async () => {
+  it("should override API config with data attributes for testing", async () => {
     mockScriptTag.setAttribute("src", "https://analytics.example.com/script.js");
     mockScriptTag.setAttribute("data-site-id", "123");
     mockScriptTag.setAttribute("data-skip-patterns", '["/admin/**"]');
     mockScriptTag.setAttribute("data-mask-patterns", '["/user/**"]');
-    mockScriptTag.setAttribute("data-session-replay", "true");
-    mockScriptTag.setAttribute("data-web-vitals", "true");
-    mockScriptTag.setAttribute("data-track-errors", "true");
-    mockScriptTag.setAttribute("data-track-outbound", "false");
-    mockScriptTag.setAttribute("data-track-url-params", "false");
-    mockScriptTag.setAttribute("data-track-initial-pageview", "false");
-    mockScriptTag.setAttribute("data-track-spa-navigation", "false");
+
+    // Mock successful API response
+    (global.fetch as any).mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        sessionReplay: true,
+        webVitals: true,
+        trackErrors: true,
+        trackOutbound: false,
+        trackUrlParams: false,
+        trackInitialPageView: false,
+        trackSpaNavigation: false,
+      }),
+    });
 
     const config = await parseScriptConfig(mockScriptTag);
 
+    // These should be from data attributes (overrides for testing)
     expect(config?.skipPatterns).toEqual(["/admin/**"]);
     expect(config?.maskPatterns).toEqual(["/user/**"]);
 
+    // These should be from API
     expect(config?.enableSessionReplay).toBe(true);
     expect(config?.enableWebVitals).toBe(true);
     expect(config?.trackErrors).toBe(true);
     expect(config?.trackOutbound).toBe(false);
-    expect(config?.trackQuerystring).toBe(false);
-    expect(config?.autoTrackPageview).toBe(false);
-    expect(config?.autoTrackSpa).toBe(false);
-    expect(global.fetch).not.toHaveBeenCalled();
   });
 
   it("should parse skip patterns", async () => {
