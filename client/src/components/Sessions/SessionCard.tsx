@@ -1,8 +1,10 @@
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { useGetSite } from "@/api/admin/hooks/useSites";
+import { GameFormFactorIcon, GamePlatformBadge, getGamePlatformInfo } from "@/components/GamePlatform";
 import { addFilter, getTimezone } from "@/lib/store";
 import { FilterParameter } from "@rybbit/shared";
-import { ArrowRight, ChevronDown, ChevronRight, Video } from "lucide-react";
+import { ArchiveRestore, ArrowRight, ChevronDown, ChevronRight, Video } from "lucide-react";
 import { DateTime } from "luxon";
 import { useExtracted } from "next-intl";
 import Link from "next/link";
@@ -34,8 +36,69 @@ interface SessionCardProps {
   highlightedEventTimestamp?: number;
 }
 
-export function SessionCard({ session, onClick, userId, expandedByDefault, highlightedEventTimestamp }: SessionCardProps) {
+function GameSessionBadges({ session }: { session: GetSessionsResponse[number] }) {
+  const t = useExtracted();
+  const platform = getGamePlatformInfo(session.game_platform);
+
+  return (
+    <>
+      <GamePlatformBadge code={session.game_platform} />
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Badge className="flex items-center gap-1 bg-neutral-100 text-neutral-600 dark:bg-neutral-800 dark:text-neutral-300">
+            <GameFormFactorIcon formFactor={platform.formFactor} />
+            <span className="hidden 2xl:inline capitalize">{platform.formFactor}</span>
+          </Badge>
+        </TooltipTrigger>
+        <TooltipContent>
+          {t("Form factor")}: {platform.formFactor}
+        </TooltipContent>
+      </Tooltip>
+      {session.game_build_version && (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Badge variant="secondary">{session.game_build_version}</Badge>
+          </TooltipTrigger>
+          <TooltipContent>{t("Build version")}</TooltipContent>
+        </Tooltip>
+      )}
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Badge className="flex items-center gap-1 bg-neutral-100 text-neutral-600 dark:bg-neutral-800 dark:text-neutral-300">
+            <EventIcon />
+            <span>{formatter(session.game_actions)}</span>
+          </Badge>
+        </TooltipTrigger>
+        <TooltipContent>{t("Gameplay actions")}</TooltipContent>
+      </Tooltip>
+      {session.game_play_mode && <Badge variant="secondary">{session.game_play_mode}</Badge>}
+      {!!session.game_reconstructed && (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Badge variant="warning" className="flex items-center gap-1">
+              <ArchiveRestore className="h-3 w-3" />
+              {t("Reconstructed")}
+            </Badge>
+          </TooltipTrigger>
+          <TooltipContent>
+            {t("Reconstructed from aggregate Plausible data; this individual session is approximate.")}
+          </TooltipContent>
+        </Tooltip>
+      )}
+    </>
+  );
+}
+
+export function SessionCard({
+  session,
+  onClick,
+  userId,
+  expandedByDefault,
+  highlightedEventTimestamp,
+}: SessionCardProps) {
   const { site } = useParams();
+  const { data: siteMetadata } = useGetSite(site as string);
+  const isGame = siteMetadata?.type === "game";
   const t = useExtracted();
   const { hour12, formatDateTime } = useDateTimeFormat();
   const [expanded, setExpanded] = useState(expandedByDefault || false);
@@ -45,9 +108,7 @@ export function SessionCard({ session, onClick, userId, expandedByDefault, highl
   const end = DateTime.fromSQL(session.session_end);
   const totalSeconds = Math.floor(end.diff(start).milliseconds / 1000);
   const duration = formatShortDuration(totalSeconds);
-  const relativeTime = DateTime.fromSQL(session.session_start, { zone: "utc" })
-    .setZone(getTimezone())
-    .toRelative();
+  const relativeTime = DateTime.fromSQL(session.session_start, { zone: "utc" }).setZone(getTimezone()).toRelative();
   const isIdentified = !!session.identified_user_id;
 
   const handleCardClick = () => {
@@ -90,7 +151,9 @@ export function SessionCard({ session, onClick, userId, expandedByDefault, highl
                 <span className="text-xs text-neutral-600 dark:text-neutral-200 truncate max-w-[150px]">
                   {getUserDisplayName(session)}
                 </span>
-                {!!session.identified_user_id && <IdentifiedBadge traits={session.traits} userId={session.identified_user_id} />}
+                {!!session.identified_user_id && (
+                  <IdentifiedBadge traits={session.traits} userId={session.identified_user_id} />
+                )}
               </div>
             )}
             <span className="ml-auto text-xs text-neutral-500 dark:text-neutral-400">
@@ -118,23 +181,29 @@ export function SessionCard({ session, onClick, userId, expandedByDefault, highl
                 onClick={e => handleFilterClick(e, "country", session.country)}
               />
             )}
-            <BrowserTooltipIcon
-              browser={session.browser || "Unknown"}
-              browser_version={session.browser_version}
-              onClick={e => handleFilterClick(e, "browser", session.browser)}
-            />
-            <OperatingSystemTooltipIcon
-              operating_system={session.operating_system || ""}
-              operating_system_version={session.operating_system_version}
-              onClick={e => handleFilterClick(e, "operating_system", session.operating_system)}
-            />
-            <DeviceTypeTooltipIcon
-              device_type={session.device_type || ""}
-              screen_width={session.screen_width}
-              screen_height={session.screen_height}
-              onClick={e => handleFilterClick(e, "device_type", session.device_type)}
-            />
-            {session.has_replay === 1 && (
+            {isGame ? (
+              <GameSessionBadges session={session} />
+            ) : (
+              <>
+                <BrowserTooltipIcon
+                  browser={session.browser || "Unknown"}
+                  browser_version={session.browser_version}
+                  onClick={e => handleFilterClick(e, "browser", session.browser)}
+                />
+                <OperatingSystemTooltipIcon
+                  operating_system={session.operating_system || ""}
+                  operating_system_version={session.operating_system_version}
+                  onClick={e => handleFilterClick(e, "operating_system", session.operating_system)}
+                />
+                <DeviceTypeTooltipIcon
+                  device_type={session.device_type || ""}
+                  screen_width={session.screen_width}
+                  screen_height={session.screen_height}
+                  onClick={e => handleFilterClick(e, "device_type", session.device_type)}
+                />
+              </>
+            )}
+            {!isGame && session.has_replay === 1 && (
               <Tooltip>
                 <TooltipTrigger asChild>
                   <Badge
@@ -150,29 +219,41 @@ export function SessionCard({ session, onClick, userId, expandedByDefault, highl
                 <TooltipContent>{t("Watch Session Replay")}</TooltipContent>
               </Tooltip>
             )}
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Badge className="flex items-center gap-1 bg-neutral-100 dark:bg-neutral-800 text-neutral-600 dark:text-neutral-300">
-                  <PageviewIcon />
-                  <span>{formatter(session.pageviews)}</span>
-                </Badge>
-              </TooltipTrigger>
-              <TooltipContent>{t("Pageviews")}</TooltipContent>
-            </Tooltip>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Badge className="flex items-center gap-1 bg-neutral-100 dark:bg-neutral-800 text-neutral-600 dark:text-neutral-300">
-                  <EventIcon />
-                  <span>{formatter(session.events + (session.button_clicks || 0) + (session.copies || 0) + (session.form_submits || 0) + (session.input_changes || 0))}</span>
-                </Badge>
-              </TooltipTrigger>
-              <TooltipContent>{t("Events")}</TooltipContent>
-            </Tooltip>
-            <Channel
-              channel={session.channel}
-              referrer={session.referrer}
-              onClick={e => handleFilterClick(e, "channel", session.channel)}
-            />
+            {!isGame && (
+              <>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Badge className="flex items-center gap-1 bg-neutral-100 dark:bg-neutral-800 text-neutral-600 dark:text-neutral-300">
+                      <PageviewIcon />
+                      <span>{formatter(session.pageviews)}</span>
+                    </Badge>
+                  </TooltipTrigger>
+                  <TooltipContent>{t("Pageviews")}</TooltipContent>
+                </Tooltip>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Badge className="flex items-center gap-1 bg-neutral-100 dark:bg-neutral-800 text-neutral-600 dark:text-neutral-300">
+                      <EventIcon />
+                      <span>
+                        {formatter(
+                          session.events +
+                            (session.button_clicks || 0) +
+                            (session.copies || 0) +
+                            (session.form_submits || 0) +
+                            (session.input_changes || 0)
+                        )}
+                      </span>
+                    </Badge>
+                  </TooltipTrigger>
+                  <TooltipContent>{t("Events")}</TooltipContent>
+                </Tooltip>
+                <Channel
+                  channel={session.channel}
+                  referrer={session.referrer}
+                  onClick={e => handleFilterClick(e, "channel", session.channel)}
+                />
+              </>
+            )}
           </div>
         </div>
 
@@ -180,9 +261,7 @@ export function SessionCard({ session, onClick, userId, expandedByDefault, highl
         <div className="hidden md:flex items-center gap-2">
           {!userId && (
             <Link
-              href={`/${site}/user/${encodeURIComponent(
-                isIdentified ? session.identified_user_id : session.user_id
-              )}`}
+              href={`/${site}/user/${encodeURIComponent(isIdentified ? session.identified_user_id : session.user_id)}`}
               onClick={e => e.stopPropagation()}
               className="flex items-center gap-2"
             >
@@ -194,7 +273,9 @@ export function SessionCard({ session, onClick, userId, expandedByDefault, highl
               <span className="text-xs text-neutral-600 dark:text-neutral-200 w-24 truncate hover:underline">
                 {getUserDisplayName(session)}
               </span>
-              {!!session.identified_user_id && <IdentifiedBadge traits={session.traits} userId={session.identified_user_id} />}
+              {!!session.identified_user_id && (
+                <IdentifiedBadge traits={session.traits} userId={session.identified_user_id} />
+              )}
             </Link>
           )}
 
@@ -208,23 +289,29 @@ export function SessionCard({ session, onClick, userId, expandedByDefault, highl
                 onClick={e => handleFilterClick(e, "country", session.country)}
               />
             )}
-            <BrowserTooltipIcon
-              browser={session.browser || "Unknown"}
-              browser_version={session.browser_version}
-              onClick={e => handleFilterClick(e, "browser", session.browser)}
-            />
-            <OperatingSystemTooltipIcon
-              operating_system={session.operating_system || ""}
-              operating_system_version={session.operating_system_version}
-              onClick={e => handleFilterClick(e, "operating_system", session.operating_system)}
-            />
-            <DeviceTypeTooltipIcon
-              device_type={session.device_type || ""}
-              screen_width={session.screen_width}
-              screen_height={session.screen_height}
-              onClick={e => handleFilterClick(e, "device_type", session.device_type)}
-            />
-            {session.has_replay === 1 && (
+            {isGame ? (
+              <GameSessionBadges session={session} />
+            ) : (
+              <>
+                <BrowserTooltipIcon
+                  browser={session.browser || "Unknown"}
+                  browser_version={session.browser_version}
+                  onClick={e => handleFilterClick(e, "browser", session.browser)}
+                />
+                <OperatingSystemTooltipIcon
+                  operating_system={session.operating_system || ""}
+                  operating_system_version={session.operating_system_version}
+                  onClick={e => handleFilterClick(e, "operating_system", session.operating_system)}
+                />
+                <DeviceTypeTooltipIcon
+                  device_type={session.device_type || ""}
+                  screen_width={session.screen_width}
+                  screen_height={session.screen_height}
+                  onClick={e => handleFilterClick(e, "device_type", session.device_type)}
+                />
+              </>
+            )}
+            {!isGame && session.has_replay === 1 && (
               <Tooltip>
                 <TooltipTrigger asChild>
                   <Badge
@@ -240,29 +327,41 @@ export function SessionCard({ session, onClick, userId, expandedByDefault, highl
                 <TooltipContent>{t("Watch Session Replay")}</TooltipContent>
               </Tooltip>
             )}
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Badge className="flex items-center gap-1 bg-neutral-100 dark:bg-neutral-800 text-neutral-600 dark:text-neutral-300">
-                  <PageviewIcon />
-                  <span>{formatter(session.pageviews)}</span>
-                </Badge>
-              </TooltipTrigger>
-              <TooltipContent>{t("Pageviews")}</TooltipContent>
-            </Tooltip>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Badge className="flex items-center gap-1 bg-neutral-100 dark:bg-neutral-800 text-neutral-600 dark:text-neutral-300">
-                  <EventIcon />
-                  <span>{formatter(session.events + (session.button_clicks || 0) + (session.copies || 0) + (session.form_submits || 0) + (session.input_changes || 0))}</span>
-                </Badge>
-              </TooltipTrigger>
-              <TooltipContent>{t("Events")}</TooltipContent>
-            </Tooltip>
-            <Channel
-              channel={session.channel}
-              referrer={session.referrer}
-              onClick={e => handleFilterClick(e, "channel", session.channel)}
-            />
+            {!isGame && (
+              <>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Badge className="flex items-center gap-1 bg-neutral-100 dark:bg-neutral-800 text-neutral-600 dark:text-neutral-300">
+                      <PageviewIcon />
+                      <span>{formatter(session.pageviews)}</span>
+                    </Badge>
+                  </TooltipTrigger>
+                  <TooltipContent>{t("Pageviews")}</TooltipContent>
+                </Tooltip>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Badge className="flex items-center gap-1 bg-neutral-100 dark:bg-neutral-800 text-neutral-600 dark:text-neutral-300">
+                      <EventIcon />
+                      <span>
+                        {formatter(
+                          session.events +
+                            (session.button_clicks || 0) +
+                            (session.copies || 0) +
+                            (session.form_submits || 0) +
+                            (session.input_changes || 0)
+                        )}
+                      </span>
+                    </Badge>
+                  </TooltipTrigger>
+                  <TooltipContent>{t("Events")}</TooltipContent>
+                </Tooltip>
+                <Channel
+                  channel={session.channel}
+                  referrer={session.referrer}
+                  onClick={e => handleFilterClick(e, "channel", session.channel)}
+                />
+              </>
+            )}
           </div>
 
           {/* Pages section with tooltips for long paths */}
@@ -271,13 +370,19 @@ export function SessionCard({ session, onClick, userId, expandedByDefault, highl
               <TooltipTrigger asChild>
                 <span
                   className="text-xs text-neutral-500 dark:text-neutral-400 truncate max-w-[200px] inline-block cursor-pointer hover:opacity-70"
-                  onClick={e => handleFilterClick(e, "entry_page", session.entry_page)}
+                  onClick={e =>
+                    handleFilterClick(
+                      e,
+                      isGame ? "event_name" : "entry_page",
+                      isGame ? session.first_game_event : session.entry_page
+                    )
+                  }
                 >
-                  {truncateString(session.entry_page, 32)}
+                  {truncateString(isGame ? session.first_game_event : session.entry_page, 32)}
                 </span>
               </TooltipTrigger>
               <TooltipContent>
-                <p>{session.entry_page || "-"}</p>
+                <p>{(isGame ? session.first_game_event : session.entry_page) || "-"}</p>
               </TooltipContent>
             </Tooltip>
 
@@ -287,13 +392,19 @@ export function SessionCard({ session, onClick, userId, expandedByDefault, highl
               <TooltipTrigger asChild>
                 <span
                   className="text-xs text-neutral-500 dark:text-neutral-400 truncate max-w-[200px] inline-block cursor-pointer hover:opacity-70"
-                  onClick={e => handleFilterClick(e, "exit_page", session.exit_page)}
+                  onClick={e =>
+                    handleFilterClick(
+                      e,
+                      isGame ? "event_name" : "exit_page",
+                      isGame ? session.last_game_event : session.exit_page
+                    )
+                  }
                 >
-                  {truncateString(session.exit_page, 32)}
+                  {truncateString(isGame ? session.last_game_event : session.exit_page, 32)}
                 </span>
               </TooltipTrigger>
               <TooltipContent>
-                <p>{session.exit_page || "-"}</p>
+                <p>{(isGame ? session.last_game_event : session.exit_page) || "-"}</p>
               </TooltipContent>
             </Tooltip>
           </div>
@@ -329,7 +440,9 @@ export function SessionCard({ session, onClick, userId, expandedByDefault, highl
       </div>
 
       {/* Expanded content using SessionDetails component */}
-      {expanded && <SessionDetails session={session} userId={userId} highlightedEventTimestamp={highlightedEventTimestamp} />}
+      {expanded && (
+        <SessionDetails session={session} userId={userId} highlightedEventTimestamp={highlightedEventTimestamp} />
+      )}
 
       {/* Replay Drawer */}
       {session.has_replay === 1 && (

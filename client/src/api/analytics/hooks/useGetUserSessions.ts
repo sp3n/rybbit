@@ -12,6 +12,7 @@ export function useGetSessions({
   timeOverride,
   minPageviews,
   minEvents,
+  minGameActions,
   minDuration,
 }: {
   userId?: string;
@@ -21,6 +22,7 @@ export function useGetSessions({
   timeOverride?: Time;
   minPageviews?: number;
   minEvents?: number;
+  minGameActions?: number;
   minDuration?: number;
 }) {
   const filteredFilters = getFilteredFilters(SESSION_PAGE_FILTERS);
@@ -40,6 +42,7 @@ export function useGetSessions({
       identified_only: identifiedOnly,
       min_pageviews: minPageviews,
       min_events: minEvents,
+      min_game_actions: minGameActions,
       min_duration: minDuration,
     },
     staleTime: Infinity,

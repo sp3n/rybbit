@@ -28,7 +28,7 @@ export async function getSite(request: FastifyRequest<GetSiteParams>, reply: Fas
     // Check if user has admin access
     const isOwner = await getUserHasAdminAccessToSite(request, site.siteId);
     const sessionReplay =
-      site.type === "mobile" ? false : site.sessionReplay && !usageService.isSiteWithoutReplay(site.siteId);
+      site.type && site.type !== "web" ? false : site.sessionReplay && !usageService.isSiteWithoutReplay(site.siteId);
     const featureFlagsEnabled = await hasFeatureFlagsForRuntime(site.siteId, "client");
 
     return reply.status(200).send({
@@ -50,7 +50,7 @@ export async function getSite(request: FastifyRequest<GetSiteParams>, reply: Fas
       isOwner: isOwner,
       // Analytics features
       sessionReplay,
-      webVitals: site.webVitals,
+      webVitals: site.type && site.type !== "web" ? false : site.webVitals,
       trackErrors: site.trackErrors,
       trackOutbound: site.trackOutbound,
       trackUrlParams: site.trackUrlParams,

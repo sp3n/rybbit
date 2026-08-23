@@ -56,8 +56,10 @@ export function GeneralTab({ siteMetadata, disabled = false, onClose, onPublicCh
   const { data: userOrganizations } = useUserOrganizations();
   const queryClient = useQueryClient();
   const router = useRouter();
-  const isMobileSite = siteMetadata.type === "mobile";
-  const identifierLabel = isMobileSite ? t("App Identifier") : t("Domain");
+  const [newType, setNewType] = useState<"web" | "mobile" | "game">(siteMetadata.type ?? "web");
+  const isMobileSite = newType === "mobile";
+  const isGameSite = newType === "game";
+  const identifierLabel = isMobileSite ? t("App Identifier") : isGameSite ? t("Game Identifier") : t("Domain");
 
   const [newName, setNewName] = useState(siteMetadata.name);
   const [isChangingName, setIsChangingName] = useState(false);
@@ -82,6 +84,22 @@ export function GeneralTab({ siteMetadata, disabled = false, onClose, onPublicCh
   });
 
   const [loadingStates, setLoadingStates] = useState<Record<string, boolean>>({});
+
+  const handleTypeChange = async (type: "web" | "mobile" | "game") => {
+    const previousType = newType;
+    setNewType(type);
+    try {
+      await updateSiteConfig(siteMetadata.siteId, { type });
+      toast.success(t("Analytics profile updated"));
+      queryClient.invalidateQueries({ queryKey: ["get-site"] });
+      refetch();
+      router.refresh();
+    } catch (error) {
+      console.error("Error changing analytics profile:", error);
+      setNewType(previousType);
+      toast.error(t("Failed to update analytics profile"));
+    }
+  };
 
   const handleToggle = useCallback(
     async (
@@ -142,9 +160,15 @@ export function GeneralTab({ siteMetadata, disabled = false, onClose, onPublicCh
 
     try {
       setIsChangingDomain(true);
-      const normalizedDomain = isMobileSite ? newDomain.trim() : normalizeDomain(newDomain);
+      const normalizedDomain = isMobileSite || isGameSite ? newDomain.trim() : normalizeDomain(newDomain);
       await updateSiteConfig(siteMetadata.siteId, { domain: normalizedDomain });
-      toast.success(isMobileSite ? t("App identifier updated successfully") : t("Domain updated successfully"));
+      toast.success(
+        isMobileSite
+          ? t("App identifier updated successfully")
+          : isGameSite
+            ? t("Game identifier updated successfully")
+            : t("Domain updated successfully")
+      );
       router.refresh();
       refetch();
     } catch (error) {
@@ -248,6 +272,27 @@ export function GeneralTab({ siteMetadata, disabled = false, onClose, onPublicCh
       <SettingsSection>
         <div className="space-y-2">
           <div>
+            <Label htmlFor="site-type" className="text-sm font-medium text-foreground">
+              {t("Analytics Profile")}
+            </Label>
+            <p className="mt-1 text-xs text-muted-foreground">
+              {t("Changes dashboard terminology and layout without modifying historical analytics data")}
+            </p>
+          </div>
+          <Select value={newType} onValueChange={value => handleTypeChange(value as "web" | "mobile" | "game")}>
+            <SelectTrigger id="site-type" disabled={disabled}>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="web">{t("Website")}</SelectItem>
+              <SelectItem value="mobile">{t("React Native App")}</SelectItem>
+              <SelectItem value="game">{t("Game")}</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+
+        <div className="space-y-2">
+          <div>
             <Label htmlFor="site-name" className="text-sm font-medium text-foreground">
               {t("Site Name")}
             </Label>
@@ -273,7 +318,9 @@ export function GeneralTab({ siteMetadata, disabled = false, onClose, onPublicCh
             <p className="mt-1 text-xs text-muted-foreground">
               {isMobileSite
                 ? t("The bundle or package identifier used for tracking")
-                : t("The domain used for tracking")}
+                : isGameSite
+                  ? t("The stable project identifier used by your game integration")
+                  : t("The domain used for tracking")}
             </p>
           </div>
           <div className="flex gap-2">
@@ -282,9 +329,9 @@ export function GeneralTab({ siteMetadata, disabled = false, onClose, onPublicCh
               value={newDomain}
               onChange={e => {
                 const value = e.target.value.trim();
-                setNewDomain(isMobileSite ? value : value.toLowerCase());
+                setNewDomain(isMobileSite || isGameSite ? value : value.toLowerCase());
               }}
-              placeholder={isMobileSite ? "com.example.app" : "example.com"}
+              placeholder={isMobileSite ? "com.example.app" : isGameSite ? "rhythm-towers-demo" : "example.com"}
             />
             <Button
               variant="outline"

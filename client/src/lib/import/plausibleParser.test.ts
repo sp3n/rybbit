@@ -106,6 +106,43 @@ describe("upload envelope", () => {
 });
 
 describe("file identification", () => {
+  it("routes recognised aggregate game exports through the legacy reconstruction path", async () => {
+    const { uploads, events } = await runImport(
+      {
+        "pages.csv":
+          "name,visitors,pageviews,bounce_rate,time_on_page,scroll_depth\n" +
+          "/L_Tutorial/started,4,4,0,120,\n" +
+          "/L_Tutorial/completed,2,2,0,10,\n" +
+          "/menu/start,3,2,0,30,\n",
+        "visitors.csv":
+          "date,visitors,pageviews,visits,views_per_visit,bounce_rate,visit_duration\n" +
+          "2024-03-01,2,6,2,3,0,120\n" +
+          "2024-03-02,1,2,1,2,0,30\n",
+        "custom_props.csv":
+          "property,value,visitors,events,percentage\n" +
+          "platform,Steam,3,8,100\n" +
+          "version,0.8.7.0,3,8,100\n" +
+          "local_play_mode,Solo,3,4,100\n" +
+          "local_play_mode,(none),3,4,100\n" +
+          "difficulty,3,3,4,100\n" +
+          "difficulty,(none),3,4,100\n" +
+          "logged_in,true,3,8,100\n",
+        "countries.csv": "name,visitors\nUnited Kingdom,3\n",
+      },
+      { earliest: "2024-01-01", latest: "2024-12-31" }
+    );
+
+    expect(uploads.map(upload => ({ n: upload.events.length, last: upload.isLastBatch }))).toEqual([
+      { n: 6, last: false },
+      { n: 0, last: true },
+    ]);
+    expect(events.every(event => event.type === "custom_event")).toBe(true);
+    expect(events.every(event => JSON.parse(event.props).legacy_reconstructed === true)).toBe(true);
+    expect(events.filter(event => event.event_name === "L_Tutorial/started")).toHaveLength(3);
+    expect(events.filter(event => event.event_name === "L_Tutorial/completed")).toHaveLength(2);
+    expect(events.filter(event => event.event_name === "menu/start")).toHaveLength(1);
+  });
+
   it("finalises without events when the zip has no pages.csv", async () => {
     const { uploads } = await runImport({
       "browsers.csv": "date,browser,browser_version,visitors,pageviews\n2024-03-01,Chrome,120,5,5\n",

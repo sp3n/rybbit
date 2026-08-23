@@ -45,6 +45,15 @@ export type GetSessionsResponse = {
   lat: number;
   lon: number;
   has_replay: number;
+  game_platform: string;
+  game_build_version: string;
+  game_play_mode: string;
+  game_difficulty: string;
+  game_play_session_id: string;
+  game_actions: number;
+  game_reconstructed: number;
+  first_game_event: string;
+  last_game_event: string;
 }[];
 
 // Session details type
@@ -122,6 +131,7 @@ export interface SessionsParams extends CommonApiParams, PaginationParams {
   identifiedOnly?: boolean;
   minPageviews?: number;
   minEvents?: number;
+  minGameActions?: number;
   minDuration?: number;
 }
 
@@ -149,12 +159,10 @@ export async function fetchSessions(
     identified_only: params.identifiedOnly,
     min_pageviews: params.minPageviews,
     min_events: params.minEvents,
+    min_game_actions: params.minGameActions,
     min_duration: params.minDuration,
   };
 
-  const response = await authedFetch<{ data: GetSessionsResponse }>(
-    `/sites/${site}/sessions`,
-    queryParams
-  );
+  const response = await authedFetch<{ data: GetSessionsResponse }>(`/sites/${site}/sessions`, queryParams);
   return response;
 }

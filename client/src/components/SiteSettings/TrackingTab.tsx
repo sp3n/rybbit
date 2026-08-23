@@ -38,6 +38,8 @@ export function TrackingTab({ siteMetadata, disabled = false }: TrackingTabProps
   const queryClient = useQueryClient();
   const { refetch } = useGetSitesFromOrg(siteMetadata?.organizationId ?? "");
   const isMobileSite = siteMetadata.type === "mobile";
+  const isGameSite = siteMetadata.type === "game";
+  const isNonWebSite = siteMetadata.type !== "web";
 
   const [toggleStates, setToggleStates] = useState({
     sessionReplay: siteMetadata.sessionReplay || false,
@@ -97,7 +99,7 @@ export function TrackingTab({ siteMetadata, disabled = false }: TrackingTabProps
 
   const analyticsToggles: ToggleConfig[] = [
     // Hide the replay toggle for AppSumo tiers without replays (1-3); tiers 4-7 include them
-    ...(!isMobileSite &&
+    ...(!isNonWebSite &&
     !isSubscriptionLoading &&
     (!subscription?.planName?.startsWith("appsumo") || planIncludesReplay(subscription))
       ? [
@@ -114,7 +116,7 @@ export function TrackingTab({ siteMetadata, disabled = false }: TrackingTabProps
           } as ToggleConfig,
         ]
       : []),
-    ...(IS_CLOUD && !isMobileSite
+    ...(IS_CLOUD && !isNonWebSite
       ? [
           {
             id: "webVitals",
@@ -129,7 +131,7 @@ export function TrackingTab({ siteMetadata, disabled = false }: TrackingTabProps
           } as ToggleConfig,
         ]
       : []),
-    ...(!isMobileSite
+    ...(!isNonWebSite
       ? [
           {
             id: "trackSpaNavigation",
@@ -151,21 +153,25 @@ export function TrackingTab({ siteMetadata, disabled = false }: TrackingTabProps
           } as ToggleConfig,
         ]
       : []),
-    {
-      id: "trackInitialPageView",
-      label: isMobileSite ? t("Initial Screen View") : t("Initial Page View"),
-      description: isMobileSite
-        ? t("Automatically track the initial screen passed to the React Native SDK")
-        : t("Automatically track the first page view when the script loads"),
-      value: toggleStates.trackInitialPageView,
-      key: "trackInitialPageView",
-      enabledMessage: t("Initial page view tracking enabled"),
-      disabledMessage: t("Initial page view tracking disabled"),
-    },
+    ...(!isGameSite
+      ? [
+          {
+            id: "trackInitialPageView",
+            label: isMobileSite ? t("Initial Screen View") : t("Initial Page View"),
+            description: isMobileSite
+              ? t("Automatically track the initial screen passed to the React Native SDK")
+              : t("Automatically track the first page view when the script loads"),
+            value: toggleStates.trackInitialPageView,
+            key: "trackInitialPageView",
+            enabledMessage: t("Initial page view tracking enabled"),
+            disabledMessage: t("Initial page view tracking disabled"),
+          } as ToggleConfig,
+        ]
+      : []),
   ];
 
   const autoCaptureToggles: ToggleConfig[] = [
-    ...(!isMobileSite
+    ...(!isNonWebSite
       ? [
           {
             id: "trackOutbound",
@@ -183,7 +189,9 @@ export function TrackingTab({ siteMetadata, disabled = false }: TrackingTabProps
       label: t("Error Tracking"),
       description: isMobileSite
         ? t("Allow error events sent by the React Native SDK")
-        : t("Capture JavaScript errors and exceptions from your site"),
+        : isGameSite
+          ? t("Allow error and crash events sent by your game integration")
+          : t("Capture JavaScript errors and exceptions from your site"),
       value: toggleStates.trackErrors,
       key: "trackErrors",
       enabledMessage: t("Error tracking enabled"),
@@ -191,7 +199,7 @@ export function TrackingTab({ siteMetadata, disabled = false }: TrackingTabProps
       disabled: standardFeaturesDisabled,
       badge: <Badge variant="success">Standard</Badge>,
     },
-    ...(!isMobileSite
+    ...(!isNonWebSite
       ? [
           {
             id: "trackButtonClicks",

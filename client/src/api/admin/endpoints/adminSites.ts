@@ -3,7 +3,7 @@ import { authedFetch } from "../../utils";
 export interface AdminSiteData {
   siteId: number;
   name: string;
-  type: "web" | "mobile" | null;
+  type: "web" | "mobile" | "game" | null;
   domain: string;
   organizationId: string | null;
   createdAt: string;

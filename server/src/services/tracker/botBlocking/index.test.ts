@@ -145,7 +145,7 @@ describe("checkBotBlocking", () => {
     await checkBotBlocking({
       headers: {},
       blockBots: true,
-      isMobileSite: true,
+      isNonWebSite: true,
       payload: { ...basePayload, clientBotScore: 0, clientBotSignalMask: 0 },
     });
 
@@ -199,7 +199,7 @@ describe("checkBotBlocking", () => {
     const asMobile = await checkBotBlocking({
       headers: { "user-agent": "okhttp/4.12.0" },
       blockBots: true,
-      isMobileSite: true,
+      isNonWebSite: true,
       payload: { ...basePayload, userAgent: "okhttp/4.12.0", clientBotScore: 0, clientBotSignalMask: 0 },
     });
     expect(asMobile).toBeNull();
@@ -209,7 +209,7 @@ describe("checkBotBlocking", () => {
     const result = await checkBotBlocking({
       headers: { "user-agent": "okhttp/4.12.0" },
       blockBots: true,
-      isMobileSite: true,
+      isNonWebSite: true,
       payload: {
         ...basePayload,
         userAgent: "okhttp/4.12.0",
@@ -654,7 +654,7 @@ describe("checkBotBlocking", () => {
     const result = await checkBotBlocking({
       headers: { ...browserHeaders, "user-agent": userAgent },
       blockBots: true,
-      isMobileSite: true,
+      isNonWebSite: true,
       payload: { ...basePayload, userAgent, clientBotScore: 0, clientBotSignalMask: 0 },
     });
 

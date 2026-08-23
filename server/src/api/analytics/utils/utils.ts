@@ -25,12 +25,21 @@ function coerceNumericString(value: unknown): unknown {
   return String(asNumber) === value ? asNumber : value;
 }
 
+const OPAQUE_TEXT_FIELDS = new Set([
+  "session_id",
+  "user_id",
+  "identified_user_id",
+  "effective_user_id",
+  "build_version",
+  "latest_build",
+]);
+
 export async function processResults<T>(results: ResultSet<"JSONEachRow">): Promise<T[]> {
   const data: T[] = await results.json();
   for (const row of data) {
     for (const key in row) {
       // Identifiers are opaque text even when they look numeric.
-      if (key === "session_id" || key === "user_id" || key === "identified_user_id" || key === "effective_user_id") {
+      if (OPAQUE_TEXT_FIELDS.has(key)) {
         continue;
       }
       row[key] = coerceNumericString(row[key]) as any;

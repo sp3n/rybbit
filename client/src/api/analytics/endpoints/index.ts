@@ -9,6 +9,21 @@ export type {
   LiveUserCountResponse,
 } from "./overview";
 
+export type {
+  GameBreakdownItem,
+  GameBreakdownsResponse,
+  GameLevelAttempt,
+  GameLevelItem,
+  GameLevelsResponse,
+  GameLevelSummary,
+  GameOverviewBucketedResponse,
+  GameOverviewResponse,
+  GameRelease,
+  GameReleasePlatform,
+  GameReleasesResponse,
+  GameReleaseSummary,
+} from "./game";
+
 // Events endpoints
 export { fetchSiteEventCount } from "./events";
 export type {

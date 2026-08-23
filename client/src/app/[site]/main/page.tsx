@@ -1,5 +1,6 @@
 "use client";
 import { ReactNode } from "react";
+import { useGetSite } from "../../../api/admin/hooks/useSites";
 import { useGetLiveUserCount } from "../../../api/analytics/hooks/useGetLiveUserCount";
 import { useInView } from "../../../hooks/useInView";
 import { useSetPageTitle } from "../../../hooks/useSetPageTitle";
@@ -18,6 +19,9 @@ import { PagesLite } from "./components/sections/PagesLite";
 import { Referrers } from "./components/sections/Referrers";
 import { SearchConsole } from "./components/sections/SearchConsole";
 import { Weekdays } from "./components/sections/Weekdays";
+import { GameEvents } from "./components/game/GameEvents";
+import { GamePlayBreakdowns, GameProgression, GameTechnicalBreakdowns } from "./components/game/GameBreakdowns";
+import { GameOverview } from "./components/game/GameOverview";
 
 function LazySection({ children, height = "405px" }: { children: ReactNode; height?: string }) {
   const { ref, isInView } = useInView({ persistVisibility: true, rootMargin: "100px 0px" });
@@ -30,12 +34,50 @@ function LazySection({ children, height = "405px" }: { children: ReactNode; heig
 
 export default function MainPage() {
   const { site } = useStore();
+  const { data: siteMetadata } = useGetSite(site);
 
-  if (!site) {
+  if (!site || !siteMetadata) {
     return null;
   }
 
+  if (siteMetadata.type === "game") {
+    return <GameMainPageContent />;
+  }
+
   return <MainPageContent />;
+}
+
+function GameMainPageContent() {
+  const { data } = useGetLiveUserCount(5);
+
+  useSetPageTitle(`${data?.count ?? "…"} player${data?.count === 1 ? "" : "s"} online`);
+
+  return (
+    <div className="p-2 md:p-4 max-w-[1100px] mx-auto space-y-3">
+      <SubHeader />
+      <GameOverview />
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 mt-3">
+        <LazySection>
+          <GameProgression />
+        </LazySection>
+        <LazySection>
+          <GameTechnicalBreakdowns />
+        </LazySection>
+        <LazySection>
+          <GamePlayBreakdowns />
+        </LazySection>
+        <LazySection>
+          <Countries />
+        </LazySection>
+        <LazySection>
+          <GameEvents />
+        </LazySection>
+        <LazySection>
+          <Weekdays />
+        </LazySection>
+      </div>
+    </div>
+  );
 }
 
 function MainPageContent() {

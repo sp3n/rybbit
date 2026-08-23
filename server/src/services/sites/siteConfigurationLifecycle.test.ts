@@ -74,6 +74,38 @@ beforeEach(() => {
 });
 
 describe("siteConfigurationLifecycle", () => {
+  it("converts a site to the game profile and disables web-only storage features", async () => {
+    await siteConfigurationLifecycle.update(1, {
+      type: "game",
+      domain: "rhythm-towers-demo",
+    });
+
+    expect(state.updates[0]).toMatchObject({
+      type: "game",
+      domain: "rhythm-towers-demo",
+      sessionReplay: false,
+      webVitals: false,
+    });
+  });
+
+  it("rejects invalid game identifiers", async () => {
+    await expect(siteConfigurationLifecycle.update(1, { type: "game", domain: "not/a/game" })).rejects.toMatchObject({
+      code: "invalid_game_identifier",
+      statusCode: 400,
+    });
+
+    expect(state.updates).toHaveLength(0);
+  });
+
+  it("rejects web-only features for game sites", async () => {
+    state.site = { ...makeSite(), type: "game", domain: "rhythm-towers-demo" };
+
+    await expect(siteConfigurationLifecycle.update(1, { sessionReplay: true })).rejects.toMatchObject({
+      code: "game_feature_not_supported",
+      statusCode: 400,
+    });
+  });
+
   it("updates persistence once, invalidates the Site, and reloads its configuration", async () => {
     const result = await siteConfigurationLifecycle.update(1, { name: "Renamed" });
 

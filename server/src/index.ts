@@ -42,6 +42,11 @@ import {
   getFunnel,
   getFunnelStepSessions,
   getFunnels,
+  getGameBreakdowns,
+  getGameLevels,
+  getGameOverview,
+  getGameOverviewBucketed,
+  getGameReleases,
   getGoalSessions,
   getGoalTimeSeries,
   getGoals,
@@ -357,6 +362,11 @@ async function analyticsRoutes(fastify: FastifyInstance) {
   fastify.get("/sites/:siteId/overview-bucketed", publicAnalyticsRead, getOverviewBucketed);
   fastify.get("/sites/:siteId/overview-lite", publicAnalyticsRead, getOverviewLite);
   fastify.get("/sites/:siteId/overview-bucketed-lite", publicAnalyticsRead, getOverviewBucketedLite);
+  fastify.get("/sites/:siteId/game/overview", publicAnalyticsRead, getGameOverview);
+  fastify.get("/sites/:siteId/game/overview/time-series", publicAnalyticsRead, getGameOverviewBucketed);
+  fastify.get("/sites/:siteId/game/breakdowns", publicAnalyticsRead, getGameBreakdowns);
+  fastify.get("/sites/:siteId/game/levels", publicAnalyticsRead, getGameLevels);
+  fastify.get("/sites/:siteId/game/releases", publicAnalyticsRead, getGameReleases);
   fastify.get("/sites/:siteId/metric-lite", publicAnalyticsRead, getMetricLite);
   fastify.get("/sites/:siteId/metric", publicAnalyticsRead, getMetric);
   fastify.get("/sites/:siteId/page-titles", publicAnalyticsRead, getPageTitles);

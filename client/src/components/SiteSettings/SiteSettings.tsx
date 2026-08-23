@@ -101,13 +101,19 @@ function SiteSettingsInner({ siteMetadata, trigger }: { siteMetadata: SiteRespon
 
   const currentSiteMetadata = { ...siteMetadata, public: sitePublic };
   const isMobileSite = currentSiteMetadata.type === "mobile";
+  const isGameSite = currentSiteMetadata.type === "game";
 
   const tabs: { key: TabKey; label: string; icon: React.ComponentType<{ className?: string }>; hidden?: boolean }[] = [
     { key: "general", label: t("General"), icon: Settings },
     { key: "tracking", label: t("Tracking"), icon: SlidersHorizontal },
     { key: "exclusions", label: t("Exclusions"), icon: Ban },
     { key: "integrations", label: t("Integrations"), icon: Plug, hidden: !IS_CLOUD },
-    { key: "script", label: isMobileSite ? t("React Native SDK") : t("Tracking Script"), icon: Code },
+    {
+      key: "script",
+      label: isMobileSite ? t("React Native SDK") : t("Tracking Script"),
+      icon: Code,
+      hidden: isGameSite,
+    },
     { key: "widget-embeds", label: t("Widget Embeds"), icon: LayoutTemplate },
     { key: "dashboard-embed", label: t("Dashboard Embed"), icon: LayoutDashboard },
     { key: "import", label: t("Import"), icon: Download },

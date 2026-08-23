@@ -13,7 +13,9 @@ import {
   Globe2,
   LayoutDashboard,
   LayoutGrid,
+  ListChecks,
   MousePointerClick,
+  PackageSearch,
   Rewind,
   Settings,
   Split,
@@ -44,6 +46,7 @@ function SidebarContent() {
 
   const { data: site } = useGetSite(Number(pathname.split("/")[1]));
   const isMobileSite = site?.type === "mobile";
+  const isGameSite = site?.type === "game";
 
   if (hideSidebar) return null;
 
@@ -76,10 +79,10 @@ function SidebarContent() {
       </div>
       <div className="flex min-h-0 flex-1 flex-col overflow-y-auto p-3 pt-1">
         <SidebarComponents.SectionHeader>
-          {isMobileSite ? t("App Analytics") : t("Web Analytics")}
+          {isGameSite ? t("Game Analytics") : isMobileSite ? t("App Analytics") : t("Web Analytics")}
         </SidebarComponents.SectionHeader>
         <SidebarComponents.Item
-          label={t("Main")}
+          label={isGameSite ? t("Overview") : t("Main")}
           active={isActiveTab("main")}
           href={getTabPath("main")}
           icon={<LayoutDashboard className="w-4 h-4" />}
@@ -90,7 +93,7 @@ function SidebarContent() {
           href={getTabPath("globe")}
           icon={<Globe2 className="w-4 h-4" />}
         />
-        {IS_CLOUD && (
+        {IS_CLOUD && !isGameSite && (
           <SidebarComponents.Item
             label={t("Pages")}
             active={isActiveTab("pages")}
@@ -98,7 +101,7 @@ function SidebarContent() {
             icon={<File className="w-4 h-4" />}
           />
         )}
-        {IS_CLOUD && !isMobileSite && (
+        {IS_CLOUD && !isMobileSite && !isGameSite && (
           <SidebarComponents.Item
             label={t("Performance")}
             active={isActiveTab("performance")}
@@ -106,7 +109,7 @@ function SidebarContent() {
             icon={<Gauge className="w-4 h-4" />}
           />
         )}
-        {IS_CLOUD && (
+        {IS_CLOUD && !isGameSite && (
           <SidebarComponents.Item
             label={t("Bots")}
             active={isActiveTab("bots")}
@@ -114,39 +117,46 @@ function SidebarContent() {
             icon={<Bot className="w-4 h-4" />}
           />
         )}
-        <SidebarComponents.Item
-          label={t("Goals")}
-          active={isActiveTab("goals")}
-          href={getTabPath("goals")}
-          icon={<Target className="w-4 h-4" />}
-        />
-        <div className="hidden md:block">
-          <SidebarComponents.Item
-            label={t("API Playground")}
-            active={isActiveTab("api-playground")}
-            href={getTabPath("api-playground")}
-            icon={<Code className="w-4 h-4" />}
-          />
-        </div>
-        {!IS_CLOUD && (
+        {!isGameSite && (
           <>
             <SidebarComponents.Item
-              label={t("Query")}
-              active={isActiveTab("query")}
-              href={getTabPath("query")}
-              icon={<Database className="w-4 h-4" />}
+              label={t("Goals")}
+              active={isActiveTab("goals")}
+              href={getTabPath("goals")}
+              icon={<Target className="w-4 h-4" />}
             />
-            <SidebarComponents.Item
-              label={t("Dashboards")}
-              active={isActiveTab("dashboards")}
-              href={getTabPath("dashboards")}
-              icon={<LayoutGrid className="w-4 h-4" />}
-            />
+            <div className="hidden md:block">
+              <SidebarComponents.Item
+                label={t("API Playground")}
+                active={isActiveTab("api-playground")}
+                href={getTabPath("api-playground")}
+                icon={<Code className="w-4 h-4" />}
+              />
+            </div>
+            {!IS_CLOUD && (
+              <>
+                <SidebarComponents.Item
+                  label={t("Query")}
+                  active={isActiveTab("query")}
+                  href={getTabPath("query")}
+                  icon={<Database className="w-4 h-4" />}
+                />
+                <SidebarComponents.Item
+                  label={t("Dashboards")}
+                  active={isActiveTab("dashboards")}
+                  href={getTabPath("dashboards")}
+                  icon={<LayoutGrid className="w-4 h-4" />}
+                />
+              </>
+            )}
           </>
         )}
-        <SidebarComponents.SectionHeader>{t("Product Analytics")}</SidebarComponents.SectionHeader>
+        <SidebarComponents.SectionHeader>
+          {isGameSite ? t("Game Analysis") : t("Product Analytics")}
+        </SidebarComponents.SectionHeader>
         <div className="hidden md:block">
           {!isMobileSite &&
+            !isGameSite &&
             !subscription?.planName?.startsWith("appsumo") &&
             !isSubscriptionLoading &&
             appEnv !== "demo" && (
@@ -174,14 +184,23 @@ function SidebarContent() {
             icon={<FlaskConical className="w-4 h-4" />}
           />
         )} */}
+        {isGameSite ? (
+          <SidebarComponents.Item
+            label={t("Levels & Attempts")}
+            active={isActiveTab("levels")}
+            href={getTabPath("levels")}
+            icon={<ListChecks className="w-4 h-4" />}
+          />
+        ) : (
+          <SidebarComponents.Item
+            label={t("Funnels")}
+            active={isActiveTab("funnels")}
+            href={getTabPath("funnels")}
+            icon={<Funnel className="w-4 h-4" />}
+          />
+        )}
         <SidebarComponents.Item
-          label={t("Funnels")}
-          active={isActiveTab("funnels")}
-          href={getTabPath("funnels")}
-          icon={<Funnel className="w-4 h-4" />}
-        />
-        <SidebarComponents.Item
-          label={t("Journeys")}
+          label={isGameSite ? t("Player Journeys") : t("Journeys")}
           active={isActiveTab("journeys")}
           href={getTabPath("journeys")}
           icon={<Split className="w-4 h-4" />}
@@ -192,31 +211,41 @@ function SidebarContent() {
           href={getTabPath("retention")}
           icon={<ChartColumnDecreasing className="w-4 h-4" />}
         />
-        <SidebarComponents.SectionHeader>{t("Behavior")}</SidebarComponents.SectionHeader>
+        {isGameSite && (
+          <SidebarComponents.Item
+            label={t("Releases")}
+            active={isActiveTab("releases")}
+            href={getTabPath("releases")}
+            icon={<PackageSearch className="w-4 h-4" />}
+          />
+        )}
+        <SidebarComponents.SectionHeader>{isGameSite ? t("Players") : t("Behavior")}</SidebarComponents.SectionHeader>
         <SidebarComponents.Item
-          label={t("Sessions")}
+          label={isGameSite ? t("Play Sessions") : t("Sessions")}
           active={isActiveTab("sessions")}
           href={getTabPath("sessions")}
           icon={<Rewind className="w-4 h-4" />}
         />
         <SidebarComponents.Item
-          label={t("Users")}
+          label={isGameSite ? t("Players") : t("Users")}
           active={isActiveTab("users")}
           href={getTabPath("users")}
           icon={<User className="w-4 h-4" />}
         />
         <SidebarComponents.Item
-          label={t("Events")}
+          label={isGameSite ? t("Game Events") : t("Events")}
           active={isActiveTab("events")}
           href={getTabPath("events")}
           icon={<MousePointerClick className="w-4 h-4" />}
         />
-        <SidebarComponents.Item
-          label={t("Errors")}
-          active={isActiveTab("errors")}
-          href={getTabPath("errors")}
-          icon={<AlertTriangle className="w-4 h-4" />}
-        />
+        {!isGameSite && (
+          <SidebarComponents.Item
+            label={t("Errors")}
+            active={isActiveTab("errors")}
+            href={getTabPath("errors")}
+            icon={<AlertTriangle className="w-4 h-4" />}
+          />
+        )}
         {/* <SidebarComponents.Item
           label="Reports"
           active={isActiveTab("reports")}

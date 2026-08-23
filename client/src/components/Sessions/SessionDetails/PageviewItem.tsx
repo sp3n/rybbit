@@ -12,15 +12,14 @@ import { useDateTimeFormat } from "../../../hooks/useDateTimeFormat";
 import { formatDuration } from "../../../lib/dateTimeUtils";
 import { cn } from "../../../lib/utils";
 import { EventTypeIcon } from "../../EventIcons";
+import { GameEventIcon } from "../GameEventIcon";
+import { formatGameEventName, getGameEventProperties } from "../gameEvents";
 
 function PropBadge({ label, value }: { label: string; value: unknown }) {
-  const display =
-    typeof value === "object" ? JSON.stringify(value) : String(value);
+  const display = typeof value === "object" ? JSON.stringify(value) : String(value);
   return (
     <Badge variant="outline">
-      <span className="text-neutral-600 dark:text-neutral-300 font-light mr-1">
-        {label}:
-      </span>{" "}
+      <span className="text-neutral-600 dark:text-neutral-300 font-light mr-1">{label}:</span>{" "}
       <Tooltip>
         <TooltipTrigger asChild>
           <span className="truncate">{display}</span>
@@ -36,9 +35,7 @@ function PropBadge({ label, value }: { label: string; value: unknown }) {
 function DetailsRow({ children }: { children: React.ReactNode }) {
   return (
     <div className="flex items-center pl-7 mt-1">
-      <div className="text-xs text-neutral-500 dark:text-neutral-400">
-        {children}
-      </div>
+      <div className="text-xs text-neutral-500 dark:text-neutral-400">{children}</div>
     </div>
   );
 }
@@ -46,6 +43,7 @@ function DetailsRow({ children }: { children: React.ReactNode }) {
 function renderDetails(
   item: SessionEvent,
   flags: {
+    isGame: boolean;
     isPageview: boolean;
     isOutbound: boolean;
     isEvent: boolean;
@@ -59,6 +57,7 @@ function renderDetails(
   t: (key: string) => string
 ) {
   const {
+    isGame,
     isPageview,
     isOutbound,
     isEvent,
@@ -69,6 +68,20 @@ function renderDetails(
     isInputChange,
     duration,
   } = flags;
+
+  if (isGame) {
+    const properties = getGameEventProperties(item);
+    if (properties.length === 0) return null;
+    return (
+      <DetailsRow>
+        <span className="flex flex-wrap gap-2 mt-1">
+          {properties.map(property => (
+            <PropBadge key={property.key} label={property.label} value={property.value} />
+          ))}
+        </span>
+      </DetailsRow>
+    );
+  }
 
   if (isPageview && duration) {
     return (
@@ -95,12 +108,8 @@ function renderDetails(
     return (
       <DetailsRow>
         <span className="flex flex-wrap gap-2 mt-1">
-          {item.props.text ? (
-            <PropBadge label="text" value={item.props.text} />
-          ) : null}
-          {item.props.target ? (
-            <PropBadge label="target" value={item.props.target} />
-          ) : null}
+          {item.props.text ? <PropBadge label="text" value={item.props.text} /> : null}
+          {item.props.target ? <PropBadge label="target" value={item.props.target} /> : null}
         </span>
       </DetailsRow>
     );
@@ -110,14 +119,10 @@ function renderDetails(
     return (
       <DetailsRow>
         <span>
-          {item.props.message && (
-            <PropBadge label="message" value={item.props.message} />
-          )}
+          {item.props.message && <PropBadge label="message" value={item.props.message} />}
           {item.props.stack && (
             <div>
-              <p className="mt-2 mb-1 text-neutral-600 dark:text-neutral-300 font-light">
-                {t("Stack Trace:")}
-              </p>
+              <p className="mt-2 mb-1 text-neutral-600 dark:text-neutral-300 font-light">{t("Stack Trace:")}</p>
               <pre className="text-xs text-neutral-900 dark:text-neutral-100 bg-neutral-200 dark:bg-neutral-800 p-2 rounded overflow-x-auto whitespace-pre-wrap wrap-break-word">
                 {item.props.stack}
               </pre>
@@ -130,11 +135,7 @@ function renderDetails(
 
   if (isButtonClick || isCopy || isFormSubmit || isInputChange) {
     const propsToHide = PROPS_TO_HIDE[item.type] || [];
-    const remainingProps = item.props
-      ? Object.entries(item.props).filter(
-        ([key]) => !propsToHide.includes(key)
-      )
-      : [];
+    const remainingProps = item.props ? Object.entries(item.props).filter(([key]) => !propsToHide.includes(key)) : [];
 
     if (remainingProps.length === 0) return null;
 
@@ -159,6 +160,7 @@ interface PageviewItemProps {
   nextTimestamp?: string;
   showHostname?: boolean;
   highlightedEventTimestamp?: number;
+  isGame?: boolean;
 }
 
 export function PageviewItem({
@@ -168,6 +170,7 @@ export function PageviewItem({
   nextTimestamp,
   showHostname = true,
   highlightedEventTimestamp,
+  isGame = false,
 }: PageviewItemProps) {
   const t = useExtracted();
   const getEventDisplayName = useEventDisplayName();
@@ -180,18 +183,14 @@ export function PageviewItem({
   const isCopy = item.type === "copy";
   const isFormSubmit = item.type === "form_submit";
   const isInputChange = item.type === "input_change";
-  const timestamp = DateTime.fromSQL(item.timestamp, { zone: "utc" }).setZone(
-    getTimezone()
-  );
+  const timestamp = DateTime.fromSQL(item.timestamp, { zone: "utc" }).setZone(getTimezone());
   const formattedTime = timestamp.toFormat(hour12 ? "h:mm:ss a" : "HH:mm:ss");
   const isHighlightedEvent = highlightedEventTimestamp === DateTime.fromSQL(item.timestamp, { zone: "utc" }).toMillis();
 
   // Calculate duration if this is a pageview and we have the next timestamp
   let duration = null;
-  if (isPageview && nextTimestamp) {
-    const nextTime = DateTime.fromSQL(nextTimestamp, { zone: "utc" }).setZone(
-      getTimezone()
-    );
+  if (!isGame && isPageview && nextTimestamp) {
+    const nextTime = DateTime.fromSQL(nextTimestamp, { zone: "utc" }).setZone(getTimezone());
     const totalSeconds = Math.floor(nextTime.diff(timestamp).milliseconds / 1000);
     duration = formatDuration(totalSeconds);
   }
@@ -223,39 +222,31 @@ export function PageviewItem({
       <div className="flex flex-col ml-3 flex-1 min-w-0">
         <div className="flex items-center flex-1 py-1">
           <div className="shrink-0 mr-3">
-            <EventTypeIcon type={item.type} />
+            {isGame ? <GameEventIcon event={item} /> : <EventTypeIcon type={item.type} />}
           </div>
 
           <div className="flex-1 min-w-0 mr-4">
-            {isPageview ? (
+            {isGame ? (
+              <div className="text-sm font-medium truncate" title={formatGameEventName(item)}>
+                {formatGameEventName(item)}
+              </div>
+            ) : isPageview ? (
               <Link
                 href={`https://${item.hostname}${item.pathname}${item.querystring ? `${item.querystring}` : ""}`}
                 target="_blank"
                 rel="noopener noreferrer"
               >
-                <div
-                  className="text-sm truncate hover:underline "
-                  title={item.pathname}
-                >
+                <div className="text-sm truncate hover:underline " title={item.pathname}>
                   {showHostname && item.hostname}
                   {item.pathname}
                   {item.querystring && (
-                    <span className="text-neutral-400 dark:text-neutral-500">
-                      {item.querystring}
-                    </span>
+                    <span className="text-neutral-400 dark:text-neutral-500">{item.querystring}</span>
                   )}
                 </div>
               </Link>
             ) : isOutbound && item.props?.url ? (
-              <Link
-                href={String(item.props.url)}
-                target="_blank"
-                rel="noopener noreferrer"
-              >
-                <div
-                  className="text-sm truncate hover:underline"
-                  title={String(item.props.url)}
-                >
+              <Link href={String(item.props.url)} target="_blank" rel="noopener noreferrer">
+                <div className="text-sm truncate hover:underline" title={String(item.props.url)}>
                   {String(item.props.url)}
                 </div>
               </Link>
@@ -264,21 +255,24 @@ export function PageviewItem({
             )}
           </div>
 
-          <div className="text-xs text-neutral-500 dark:text-neutral-400 shrink-0">
-            {formattedTime}
-          </div>
+          <div className="text-xs text-neutral-500 dark:text-neutral-400 shrink-0">{formattedTime}</div>
         </div>
-        {renderDetails(item, {
-          isPageview,
-          isOutbound,
-          isEvent,
-          isError,
-          isButtonClick,
-          isCopy,
-          isFormSubmit,
-          isInputChange,
-          duration,
-        }, t)}
+        {renderDetails(
+          item,
+          {
+            isGame,
+            isPageview,
+            isOutbound,
+            isEvent,
+            isError,
+            isButtonClick,
+            isCopy,
+            isFormSubmit,
+            isInputChange,
+            duration,
+          },
+          t
+        )}
       </div>
     </div>
   );

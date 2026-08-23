@@ -15,7 +15,7 @@ export async function getTrackingConfig(request: FastifyRequest<{ Params: { site
     // Report replay as off when the plan doesn't include it so the tracking script
     // never loads the recorder (replay payloads would be dropped at ingest anyway)
     const sessionReplay =
-      config.type === "mobile" ? false : config.sessionReplay && !usageService.isSiteWithoutReplay(config.siteId);
+      config.type !== "web" ? false : config.sessionReplay && !usageService.isSiteWithoutReplay(config.siteId);
     const featureFlagsEnabled = await hasFeatureFlagsForRuntime(config.siteId, "client");
 
     // Return tracking configuration
@@ -27,7 +27,7 @@ export async function getTrackingConfig(request: FastifyRequest<{ Params: { site
       type: config.type,
       featureFlagsEnabled,
       sessionReplay,
-      webVitals: config.type === "mobile" ? false : config.webVitals,
+      webVitals: config.type === "web" ? config.webVitals : false,
       trackErrors: config.trackErrors,
       trackOutbound: config.trackOutbound,
       trackUrlParams: config.trackUrlParams,

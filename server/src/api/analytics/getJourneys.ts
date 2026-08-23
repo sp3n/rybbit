@@ -6,6 +6,7 @@ import { getFilterStatement } from "./utils/getFilterStatement.js";
 import { patternToRegex } from "./utils/utils.js";
 import { getTimeStatement } from "./utils/timeWindow.js";
 import { AnalyticsQueryError, runAnalyticsQuery } from "./utils/analyticsQuery.js";
+import { excludeLegacyReconstructedEvents } from "./utils/reconstructedData.js";
 
 // stepFilters arrives as a JSON object mapping a (numeric) step index to a path
 // pattern. Both the keys and values are attacker-controlled, so validate the
@@ -72,6 +73,7 @@ export const buildJourneysQuery = (
               ${timeStatement || ""}
               ${filterStatement || ""}
               AND type = 'pageview'
+              ${excludeLegacyReconstructedEvents}
             ORDER BY session_id, timestamp
           )
           GROUP BY session_id
@@ -98,6 +100,7 @@ export const buildJourneysQuery = (
             WHERE site_id = {siteId:Int32}
             ${timeStatement || ""}
             ${filterStatement || ""}
+            ${excludeLegacyReconstructedEvents}
           ) AS percentage
         FROM journey_segments
       `;

@@ -1,6 +1,6 @@
 "use client";
 import { Button } from "@/components/ui/button";
-import { AlertCircle, AppWindow, ChevronRight, Globe2, Plus, Smartphone } from "lucide-react";
+import { AlertCircle, AppWindow, ChevronRight, Gamepad2, Globe2, Plus, Smartphone } from "lucide-react";
 import { useExtracted } from "next-intl";
 import { useRouter } from "next/navigation";
 import { ReactNode, useState } from "react";
@@ -30,7 +30,7 @@ import { planIncludesReplay } from "../../lib/subscription/planUtils";
 import { useStripeSubscription } from "../../lib/subscription/useStripeSubscription";
 import { isValidDomain, normalizeDomain } from "../../lib/utils";
 
-type SiteType = "web" | "mobile";
+type SiteType = "web" | "mobile" | "game";
 
 const isValidAppIdentifier = (value: string) => /^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$/.test(value);
 
@@ -86,6 +86,8 @@ export function AddSite({ trigger, disabled }: { trigger?: React.ReactNode; disa
   const [error, setError] = useState("");
 
   const isMobile = siteType === "mobile";
+  const isGame = siteType === "game";
+  const isNonWeb = siteType !== "web";
   const setToggle = (key: ToggleKey, checked: boolean) => setToggles(prev => ({ ...prev, [key]: checked }));
 
   const sessionReplayDisabled = !planIncludesReplay(subscription) && IS_CLOUD;
@@ -123,7 +125,7 @@ export function AddSite({ trigger, disabled }: { trigger?: React.ReactNode; disa
       disabled: sessionReplayDisabled,
       // Hide for AppSumo tiers without replays, matching the Tracking settings tab
       hidden:
-        isMobile ||
+        isNonWeb ||
         isSubscriptionLoading ||
         (subscription?.planName?.startsWith("appsumo") && !planIncludesReplay(subscription)),
     },
@@ -133,19 +135,19 @@ export function AddSite({ trigger, disabled }: { trigger?: React.ReactNode; disa
       description: t("Track Core Web Vitals metrics (LCP, CLS, INP, FCP, TTFB)"),
       badge: <Badge variant="success">Standard</Badge>,
       disabled: standardFeaturesDisabled,
-      hidden: isMobile || !IS_CLOUD,
+      hidden: isNonWeb || !IS_CLOUD,
     },
     {
       key: "trackSpaNavigation",
       label: t("SPA Navigation"),
       description: t("Automatically track navigation in single-page applications"),
-      hidden: isMobile,
+      hidden: isNonWeb,
     },
     {
       key: "trackUrlParams",
       label: t("URL Parameters"),
       description: t("Include query string parameters in page tracking"),
-      hidden: isMobile,
+      hidden: isNonWeb,
     },
     {
       key: "trackInitialPageView",
@@ -153,6 +155,7 @@ export function AddSite({ trigger, disabled }: { trigger?: React.ReactNode; disa
       description: isMobile
         ? t("Automatically track the initial screen passed to the React Native SDK")
         : t("Automatically track the first page view when the script loads"),
+      hidden: isGame,
     },
   ];
 
@@ -161,14 +164,16 @@ export function AddSite({ trigger, disabled }: { trigger?: React.ReactNode; disa
       key: "trackOutbound",
       label: t("Outbound Links"),
       description: t("Track when users click on external links"),
-      hidden: isMobile,
+      hidden: isNonWeb,
     },
     {
       key: "trackErrors",
       label: t("Error Tracking"),
       description: isMobile
         ? t("Allow error events sent by the React Native SDK")
-        : t("Capture JavaScript errors and exceptions from your site"),
+        : isGame
+          ? t("Allow error and crash events sent by your game integration")
+          : t("Capture JavaScript errors and exceptions from your site"),
       badge: <Badge variant="success">Standard</Badge>,
       disabled: standardFeaturesDisabled,
     },
@@ -178,7 +183,7 @@ export function AddSite({ trigger, disabled }: { trigger?: React.ReactNode; disa
       description: t("Automatically track clicks on all buttons"),
       badge: <Badge variant="success">Standard</Badge>,
       disabled: standardFeaturesDisabled,
-      hidden: isMobile,
+      hidden: isNonWeb,
     },
     {
       key: "trackCopy",
@@ -186,7 +191,7 @@ export function AddSite({ trigger, disabled }: { trigger?: React.ReactNode; disa
       description: t("Track when users copy text from your site"),
       badge: <Badge variant="success">Standard</Badge>,
       disabled: standardFeaturesDisabled,
-      hidden: isMobile,
+      hidden: isNonWeb,
     },
     {
       key: "trackFormInteractions",
@@ -194,7 +199,7 @@ export function AddSite({ trigger, disabled }: { trigger?: React.ReactNode; disa
       description: t("Automatically track form submissions and input/select changes"),
       badge: <Badge variant="success">Standard</Badge>,
       disabled: standardFeaturesDisabled,
-      hidden: isMobile,
+      hidden: isNonWeb,
     },
   ];
 
@@ -215,6 +220,10 @@ export function AddSite({ trigger, disabled }: { trigger?: React.ReactNode; disa
       setError(t("Invalid app identifier. Use a bundle/package identifier like com.example.app"));
       return;
     }
+    if (siteType === "game" && !isValidAppIdentifier(domain)) {
+      setError(t("Invalid game identifier. Use a stable project identifier like rhythm-towers-demo"));
+      return;
+    }
 
     try {
       const normalizedDomain = siteType === "web" ? normalizeDomain(domain) : domain.trim();
@@ -224,8 +233,8 @@ export function AddSite({ trigger, disabled }: { trigger?: React.ReactNode; disa
         isPublic: toggles.public,
         saltUserIds: toggles.saltUserIds,
         blockBots: toggles.blockBots,
-        sessionReplay: isMobile ? undefined : toggles.sessionReplay && !sessionReplayDisabled,
-        webVitals: isMobile ? undefined : toggles.webVitals && !standardFeaturesDisabled,
+        sessionReplay: isNonWeb ? undefined : toggles.sessionReplay && !sessionReplayDisabled,
+        webVitals: isNonWeb ? undefined : toggles.webVitals && !standardFeaturesDisabled,
         trackErrors: toggles.trackErrors && !standardFeaturesDisabled,
         trackOutbound: toggles.trackOutbound,
         trackUrlParams: toggles.trackUrlParams,
@@ -348,7 +357,7 @@ export function AddSite({ trigger, disabled }: { trigger?: React.ReactNode; disa
               {t("Add Site")}
             </DialogTitle>
             <DialogDescription>
-              {t("Track analytics for a new website or React Native app in your organization")}
+              {t("Track analytics for a website, React Native app, or game in your organization")}
             </DialogDescription>
           </DialogHeader>
 
@@ -356,7 +365,7 @@ export function AddSite({ trigger, disabled }: { trigger?: React.ReactNode; disa
             <RadioGroup
               value={siteType}
               onValueChange={value => setSiteType(value as SiteType)}
-              className="grid grid-cols-2 gap-3"
+              className="grid grid-cols-1 sm:grid-cols-3 gap-3"
             >
               <Label
                 htmlFor="site-type-web"
@@ -374,11 +383,19 @@ export function AddSite({ trigger, disabled }: { trigger?: React.ReactNode; disa
                 <Smartphone className="h-4 w-4" />
                 <span>{t("React Native App")}</span>
               </Label>
+              <Label
+                htmlFor="site-type-game"
+                className="flex cursor-pointer items-center gap-2 rounded-md border border-neutral-200 p-3 text-sm dark:border-neutral-800"
+              >
+                <RadioGroupItem id="site-type-game" value="game" />
+                <Gamepad2 className="h-4 w-4" />
+                <span>{t("Game")}</span>
+              </Label>
             </RadioGroup>
 
             <div className="grid w-full items-center gap-1.5">
               <Label htmlFor="domain" className="text-sm font-medium">
-                {siteType === "web" ? t("Domain") : t("App Identifier")}
+                {siteType === "web" ? t("Domain") : siteType === "mobile" ? t("App Identifier") : t("Game Identifier")}
               </Label>
               <Input
                 id="domain"
@@ -387,7 +404,13 @@ export function AddSite({ trigger, disabled }: { trigger?: React.ReactNode; disa
                   const value = e.target.value.trim();
                   setDomain(siteType === "web" ? value.toLowerCase() : value);
                 }}
-                placeholder={siteType === "web" ? "example.com or sub.example.com" : "com.example.app"}
+                placeholder={
+                  siteType === "web"
+                    ? "example.com or sub.example.com"
+                    : siteType === "mobile"
+                      ? "com.example.app"
+                      : "rhythm-towers-demo"
+                }
               />
             </div>
             <div className="grid w-full items-center gap-1.5">

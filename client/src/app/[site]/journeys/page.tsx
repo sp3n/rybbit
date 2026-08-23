@@ -15,6 +15,7 @@ import { timeZone } from "../../../lib/dateTimeUtils";
 import { useStore } from "../../../lib/store";
 import { JOURNEY_PAGE_FILTERS } from "../../../lib/filterGroups";
 import { SubHeader } from "../components/SubHeader/SubHeader";
+import { ReconstructedAnalysisExclusionNotice } from "../components/game/GameAnalysisLayout";
 import { SankeyDiagram } from "./components/SankeyDiagram";
 
 export default function JourneysPage() {
@@ -55,6 +56,7 @@ export default function JourneysPage() {
     <DisabledOverlay message="User Journeys" featurePath="journeys">
       <div className="container mx-auto p-2 md:p-4">
         <SubHeader availableFilters={JOURNEY_PAGE_FILTERS} />
+        {siteMetadata?.type === "game" && <ReconstructedAnalysisExclusionNotice />}
         <div className="flex items-center gap-6 my-1">
           <div className="flex items-center gap-3 w-[180px]">
             <span className="text-sm text-neutral-600 dark:text-neutral-300 whitespace-nowrap">

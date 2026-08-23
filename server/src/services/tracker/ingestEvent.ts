@@ -70,7 +70,7 @@ export async function ingestEvent(trackingRequest: TrackingRequest): Promise<Ing
     headers: trackingRequest.headers,
     blockBots: site.blockBots,
     trustedServerSideIngestion: trackingRequest.trustedServerSideIngestion,
-    isMobileSite: site.type === "mobile",
+    isNonWebSite: site.type !== "web",
     lookupAsn: trackingRequest.lookupAsn,
     payload: {
       siteId: site.siteId,

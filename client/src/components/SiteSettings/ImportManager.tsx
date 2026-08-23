@@ -19,15 +19,18 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
-import { Upload, FileText, AlertCircle, CheckCircle2, Loader2, Trash2 } from "lucide-react";
+import { Upload, FileText, AlertCircle, CheckCircle2, Loader2, Trash2, ArchiveRestore } from "lucide-react";
 import { useExtracted } from "next-intl";
 import { useGetSiteImports, useCreateSiteImport, useDeleteSiteImport } from "@/api/admin/hooks/useImport";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { IS_CLOUD } from "@/lib/const";
 import { CsvParser } from "@/lib/import/csvParser";
 import { PlausibleCsvParser } from "@/lib/import/plausibleParser";
+import { inspectPlausibleArchive, LegacyGameInspection } from "@/lib/import/plausibleLegacyGame";
 import { ImportPlatform } from "@/types/import";
 import { DisabledOverlay } from "@/components/DisabledOverlay";
+import { Checkbox } from "@/components/ui/checkbox";
+import { useSiteHasData } from "@/api/admin/hooks/useSites";
 
 import { SettingsSection, SettingsSections } from "./SettingsSection";
 
@@ -65,7 +68,11 @@ export function ImportManager({ siteId, disabled }: ImportManagerProps) {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [selectedPlatform, setSelectedPlatform] = useState<ImportPlatform | "">("");
   const [fileError, setFileError] = useState<string>("");
+  const [isInspectingFile, setIsInspectingFile] = useState(false);
+  const [legacyGameInspection, setLegacyGameInspection] = useState<LegacyGameInspection | null>(null);
+  const [excludeLegacyFinalDay, setExcludeLegacyFinalDay] = useState(true);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const fileInspectionTokenRef = useRef(0);
   const workerManagerRef = useRef<CsvParser | PlausibleCsvParser | null>(null);
 
   function validateFile(file: File | null, platform: ImportPlatform | ""): string {
@@ -88,6 +95,7 @@ export function ImportManager({ siteId, disabled }: ImportManagerProps) {
   }
 
   const { data, isLoading, error } = useGetSiteImports(siteId);
+  const { data: siteHasData } = useSiteHasData(String(siteId));
   const createImportMutation = useCreateSiteImport(siteId);
   const deleteMutation = useDeleteSiteImport(siteId);
 
@@ -97,10 +105,34 @@ export function ImportManager({ siteId, disabled }: ImportManagerProps) {
     };
   }, []);
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0] || null;
+    const token = ++fileInspectionTokenRef.current;
     setSelectedFile(file);
-    setFileError(validateFile(file, selectedPlatform));
+    setLegacyGameInspection(null);
+    setExcludeLegacyFinalDay(true);
+    const validationError = validateFile(file, selectedPlatform);
+    setFileError(validationError);
+
+    if (!file || validationError || selectedPlatform !== "plausible") return;
+
+    setIsInspectingFile(true);
+    try {
+      const inspection = await inspectPlausibleArchive(file);
+      if (token !== fileInspectionTokenRef.current) return;
+      if (inspection.kind === "legacy_game_aggregate") {
+        setLegacyGameInspection(inspection);
+        setExcludeLegacyFinalDay(siteHasData !== false);
+      } else if (inspection.kind === "unsupported") {
+        setFileError(t("This Plausible ZIP does not contain a supported export."));
+      }
+    } catch {
+      if (token === fileInspectionTokenRef.current) {
+        setFileError(t("Rybbit could not read this Plausible ZIP."));
+      }
+    } finally {
+      if (token === fileInspectionTokenRef.current) setIsInspectingFile(false);
+    }
   };
 
   const onSubmit = (e: React.FormEvent) => {
@@ -128,7 +160,8 @@ export function ImportManager({ siteId, disabled }: ImportManagerProps) {
               siteId,
               importId,
               allowedDateRange.earliestAllowedDate,
-              allowedDateRange.latestAllowedDate
+              allowedDateRange.latestAllowedDate,
+              { excludeLegacyFinalDay }
             );
             workerManagerRef.current = parser;
             parser.startImport(selectedFile).catch(err => {
@@ -149,6 +182,7 @@ export function ImportManager({ siteId, disabled }: ImportManagerProps) {
           setSelectedFile(null);
           setSelectedPlatform("");
           setFileError("");
+          setLegacyGameInspection(null);
           if (fileInputRef.current) {
             fileInputRef.current.value = "";
           }
@@ -207,7 +241,13 @@ export function ImportManager({ siteId, disabled }: ImportManagerProps) {
   const hasActiveImport = IS_CLOUD && sortedImports.some(imp => imp.completedAt === null);
 
   const isImportDisabled =
-    !selectedFile || !selectedPlatform || !!fileError || createImportMutation.isPending || disabled || hasActiveImport;
+    !selectedFile ||
+    !selectedPlatform ||
+    !!fileError ||
+    isInspectingFile ||
+    createImportMutation.isPending ||
+    disabled ||
+    hasActiveImport;
 
   return (
     <DisabledOverlay message="Data Import" requiredPlan="standard">
@@ -235,6 +275,9 @@ export function ImportManager({ siteId, disabled }: ImportManagerProps) {
                   setSelectedPlatform(value);
                   setSelectedFile(null);
                   setFileError("");
+                  setLegacyGameInspection(null);
+                  setExcludeLegacyFinalDay(true);
+                  fileInspectionTokenRef.current += 1;
                   if (fileInputRef.current) {
                     fileInputRef.current.value = "";
                   }
@@ -261,10 +304,62 @@ export function ImportManager({ siteId, disabled }: ImportManagerProps) {
                 accept={selectedPlatform === "plausible" ? ".zip" : ".csv"}
                 multiple={false}
                 onChange={handleFileChange}
-                disabled={disabled || createImportMutation.isPending || hasActiveImport}
+                disabled={disabled || createImportMutation.isPending || hasActiveImport || isInspectingFile}
               />
+              {isInspectingFile && (
+                <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  {t("Inspecting Plausible archive...")}
+                </p>
+              )}
               {fileError && <p className="text-xs text-red-600 dark:text-red-400">{fileError}</p>}
             </div>
+
+            {legacyGameInspection && (
+              <Alert>
+                <ArchiveRestore className="h-4 w-4" />
+                <AlertDescription className="space-y-3">
+                  <div className="space-y-1">
+                    <p className="font-medium text-foreground">{t("Legacy aggregate game export detected")}</p>
+                    <p>
+                      {t(
+                        "Rybbit will preserve the daily totals and game-event counts, then mark reconstructed sessions and property correlations as approximate. Player journeys and retention should not be treated as historical fact."
+                      )}
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                    <span>
+                      {legacyGameInspection.sourceActions.toLocaleString()} {t("source actions")}
+                    </span>
+                    <span>
+                      {legacyGameInspection.levelStarts.toLocaleString()} {t("level starts")}
+                    </span>
+                    <span>
+                      {legacyGameInspection.firstDate} {t("to")} {legacyGameInspection.lastDate}
+                    </span>
+                  </div>
+                  <div className="flex items-start gap-2 rounded-md border border-neutral-200 p-3 dark:border-neutral-800">
+                    <Checkbox
+                      id="exclude-legacy-final-day"
+                      checked={excludeLegacyFinalDay}
+                      onCheckedChange={checked => setExcludeLegacyFinalDay(checked === true)}
+                    />
+                    <Label htmlFor="exclude-legacy-final-day" className="space-y-1 font-normal leading-snug">
+                      <span className="block font-medium text-foreground">{t("Exclude the migration day")}</span>
+                      <span className="block text-xs text-muted-foreground">
+                        {siteHasData === false
+                          ? t("This site is empty, so keep the final day unless it will overlap data added later.")
+                          : t(
+                              "Recommended because this site already has data that may overlap the Plausible export."
+                            )}{" "}
+                        {legacyGameInspection.lastDate} {t("contains")}{" "}
+                        {legacyGameInspection.finalDayActions.toLocaleString()} {t("actions")}.
+                      </span>
+                    </Label>
+                  </div>
+                </AlertDescription>
+              </Alert>
+            )}
 
             {/* Import Button */}
             <Button type="submit" disabled={isImportDisabled} className="w-full sm:w-auto">
@@ -322,7 +417,7 @@ export function ImportManager({ siteId, disabled }: ImportManagerProps) {
             <div className="rounded-lg border border-dashed border-neutral-300 py-8 text-center text-muted-foreground dark:border-neutral-800">
               <FileText className="mx-auto mb-2 h-8 w-8 opacity-50" />
               <p className="text-sm font-medium">{t("No imports yet")}</p>
-              <p className="text-xs">{t("Upload a CSV file to get started")}</p>
+              <p className="text-xs">{t("Choose a platform and upload an export to get started")}</p>
             </div>
           ) : (
             <div className="overflow-hidden rounded-lg border border-neutral-150 dark:border-neutral-800">

@@ -46,6 +46,9 @@ export { getBotTimeSeries } from "./bots/getBotTimeSeries.js";
 export { generatePdfReport } from "./generatePdfReport.js";
 
 // Core Analytics
+export { getGameBreakdowns, getGameOverview, getGameOverviewBucketed } from "./game/getGameAnalytics.js";
+export { getGameLevels } from "./game/getGameLevels.js";
+export { getGameReleases } from "./game/getGameReleases.js";
 export { getErrorBucketed } from "./getErrorBucketed.js";
 export { getErrorEvents } from "./getErrorEvents.js";
 export { getErrorNames } from "./getErrorNames.js";

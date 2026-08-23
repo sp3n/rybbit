@@ -270,7 +270,7 @@ describe("ingestEvent", () => {
         headers: { "user-agent": "Mozilla/5.0", "accept-language": "en-US" },
         blockBots: true,
         trustedServerSideIngestion: true,
-        isMobileSite: false,
+        isNonWebSite: false,
         lookupAsn,
       })
     );

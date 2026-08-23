@@ -7,7 +7,7 @@ import { logger } from "./logger/logger.js";
 export interface SiteConfigData {
   id: string | null;
   siteId: number;
-  type: "web" | "mobile";
+  type: "web" | "mobile" | "game";
   public: boolean;
   embedEnabled: boolean;
   saltUserIds: boolean;

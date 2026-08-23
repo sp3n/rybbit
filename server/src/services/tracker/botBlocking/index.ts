@@ -51,11 +51,11 @@ interface BotBlockingInput {
   blockBots: boolean;
   trustedServerSideIngestion?: boolean;
   /**
-   * App/mobile site. The UA-pattern and header-heuristic layers are
+   * Native app or game site. The UA-pattern and header-heuristic layers are
    * browser-shaped and produce false positives for native SDK traffic, so they
-   * are skipped for mobile sites (see checkBotBlocking).
+   * skipped for non-web sites (see checkBotBlocking).
    */
-  isMobileSite?: boolean;
+  isNonWebSite?: boolean;
   payload: BotBlockingPayload;
   /** Request-scoped ASN resolver, shared with the rest of the ingestion path. */
   lookupAsn?: AsnLookup;
@@ -154,11 +154,7 @@ function buildBotEventProperties(
   };
 }
 
-function getClientSignalResult(
-  payload: BotBlockingPayload,
-  userAgent: string,
-  hasReportableScreen: boolean
-) {
+function getClientSignalResult(payload: BotBlockingPayload, userAgent: string, hasReportableScreen: boolean) {
   const hasClientScore = typeof payload.clientBotScore === "number" && Number.isFinite(payload.clientBotScore);
   const hasClientMask = typeof payload.clientBotSignalMask === "number" && Number.isFinite(payload.clientBotSignalMask);
   const rawMask = hasClientMask ? payload.clientBotSignalMask! : 0;
@@ -216,12 +212,12 @@ export async function checkBotBlocking({
   headers,
   blockBots,
   trustedServerSideIngestion = false,
-  isMobileSite = false,
+  isNonWebSite = false,
   payload,
   lookupAsn: asnLookup = lookupAsn,
 }: BotBlockingInput): Promise<BotDetectionResult | null> {
   const userAgent = payload.userAgent || (headers["user-agent"] as string) || "";
-  const clientSignalResult = getClientSignalResult(payload, userAgent, !isMobileSite && !trustedServerSideIngestion);
+  const clientSignalResult = getClientSignalResult(payload, userAgent, !isNonWebSite && !trustedServerSideIngestion);
   recordBotBlockingRequest(
     clientSignalResult.scoreForStats,
     clientSignalResult.maskForStats,
@@ -253,10 +249,10 @@ export async function checkBotBlocking({
   // Layers 1 and 2 are browser-shaped: they flag native HTTP clients (okhttp,
   // CFNetwork, Cronet) as scripting frameworks and treat the absence of
   // browser-only headers (Accept-Language, sec-fetch-*) as suspicious. A
-  // first-party mobile SDK legitimately looks exactly like that, so skip these
-  // layers for app/mobile sites and rely on the client-signal, ASN, and
+  // first-party native SDK legitimately looks exactly like that, so skip these
+  // layers for non-web sites and rely on the client-signal, ASN, and
   // rate-anomaly layers below, which apply equally to native traffic.
-  if (!isMobileSite) {
+  if (!isNonWebSite) {
     // Layer 1: User-agent classification (vendored from isbot patterns, with categories)
     const uaClassification = classifyUA(userAgent);
     if (uaClassification.isBot) {

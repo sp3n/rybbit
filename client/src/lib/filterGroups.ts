@@ -27,7 +27,22 @@ const BASE_FILTERS: FilterParameter[] = [
   "tag",
 ];
 
-export const SESSION_PAGE_FILTERS: FilterParameter[] = [...BASE_FILTERS, "pathname", "entry_page", "exit_page", "event_name"];
+export const SESSION_PAGE_FILTERS: FilterParameter[] = [
+  ...BASE_FILTERS,
+  "pathname",
+  "entry_page",
+  "exit_page",
+  "event_name",
+];
+
+export const GAME_SESSION_PAGE_FILTERS: FilterParameter[] = [
+  "language",
+  "country",
+  "region",
+  "city",
+  "user_id",
+  "event_name",
+];
 
 // Single-user detail page: the page is already scoped to one user, so the
 // user_id filter is excluded.
@@ -46,12 +61,7 @@ export const GOALS_PAGE_FILTERS: FilterParameter[] = [...BASE_FILTERS];
 
 export const FUNNEL_PAGE_FILTERS: FilterParameter[] = [...BASE_FILTERS];
 
-export const USER_PAGE_FILTERS: FilterParameter[] = [
-  ...BASE_FILTERS,
-  "pathname",
-  "entry_page",
-  "exit_page",
-];
+export const USER_PAGE_FILTERS: FilterParameter[] = [...BASE_FILTERS, "pathname", "entry_page", "exit_page"];
 
 export const JOURNEY_PAGE_FILTERS: FilterParameter[] = [
   "hostname",

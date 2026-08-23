@@ -4,7 +4,7 @@ import { SiteLifecycleError, siteConfigurationLifecycle } from "../../services/s
 
 const updateSiteConfigSchema = z.object({
   name: z.string().min(1).max(255).optional(),
-  type: z.enum(["web", "mobile"]).nullable().optional(),
+  type: z.enum(["web", "mobile", "game"]).nullable().optional(),
   public: z.boolean().optional(),
   embedEnabled: z.boolean().optional(),
   saltUserIds: z.boolean().optional(),

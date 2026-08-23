@@ -4,7 +4,7 @@ export type SiteResponse = {
   id: string | null;
   siteId: number;
   name: string;
-  type: "web" | "mobile" | null;
+  type: "web" | "mobile" | "game" | null;
   domain: string;
   createdAt: string;
   updatedAt: string;
@@ -48,7 +48,7 @@ export type GetSitesFromOrgResponse = {
     id: string | null;
     siteId: number;
     name: string;
-    type: "web" | "mobile" | null;
+    type: "web" | "mobile" | "game" | null;
     domain: string;
     createdAt: string;
     updatedAt: string;
@@ -80,7 +80,7 @@ export function addSite(
   name: string,
   organizationId: string,
   settings?: {
-    type?: "web" | "mobile";
+    type?: "web" | "mobile" | "game";
     isPublic?: boolean;
     saltUserIds?: boolean;
     blockBots?: boolean;
@@ -142,7 +142,7 @@ export function updateSiteConfig(
   siteId: number,
   config: {
     name?: string;
-    type?: "web" | "mobile" | null;
+    type?: "web" | "mobile" | "game" | null;
     domain?: string;
     public?: boolean;
     embedEnabled?: boolean;

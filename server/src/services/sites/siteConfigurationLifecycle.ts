@@ -10,7 +10,7 @@ import { siteConfig, type SiteConfigData } from "../../lib/siteConfig.js";
 
 type SiteRow = typeof sites.$inferSelect;
 type SiteInsert = typeof sites.$inferInsert;
-type SiteType = "web" | "mobile";
+type SiteType = "web" | "mobile" | "game";
 
 export type CreateSiteInput = {
   organizationId: string;
@@ -71,7 +71,9 @@ export type SiteLifecycleErrorCode =
   | "invalid_site_id"
   | "invalid_web_domain"
   | "invalid_mobile_identifier"
+  | "invalid_game_identifier"
   | "mobile_feature_not_supported"
+  | "game_feature_not_supported"
   | "organization_not_found"
   | "replay_not_entitled"
   | "standard_features_not_entitled"
@@ -131,7 +133,7 @@ const DIRECT_UPDATE_FIELDS = [
 ] as const satisfies ReadonlyArray<keyof UpdateSiteConfigurationInput>;
 
 function normalizeSiteType(type: SiteType | null | undefined): SiteType {
-  return type === "mobile" ? "mobile" : "web";
+  return type === "mobile" || type === "game" ? type : "web";
 }
 
 function normalizeDomain(domain: string): string {
@@ -154,12 +156,28 @@ function validateSiteIdentity(type: SiteType, domain: string): void {
       "Invalid app identifier. Use a bundle/package identifier like com.example.app"
     );
   }
+
+  if (type === "game" && !APP_IDENTIFIER_PATTERN.test(domain)) {
+    throw new SiteLifecycleError(
+      "invalid_game_identifier",
+      400,
+      "Invalid game identifier. Use a stable project identifier like rhythm-towers-demo"
+    );
+  }
 }
 
-function validateMobileFeatures(type: SiteType, input: Pick<CreateSiteInput, "sessionReplay" | "webVitals">): void {
+function validateNonWebFeatures(type: SiteType, input: Pick<CreateSiteInput, "sessionReplay" | "webVitals">): void {
   if (type === "mobile" && (input.sessionReplay || input.webVitals)) {
     throw new SiteLifecycleError(
       "mobile_feature_not_supported",
+      400,
+      "Session replay and Web Vitals are only available for web sites"
+    );
+  }
+
+  if (type === "game" && (input.sessionReplay || input.webVitals)) {
+    throw new SiteLifecycleError(
+      "game_feature_not_supported",
       400,
       "Session replay and Web Vitals are only available for web sites"
     );
@@ -199,7 +217,7 @@ class SiteConfigurationLifecycle {
     const domain = normalizeDomain(input.domain);
 
     validateSiteIdentity(siteType, domain);
-    validateMobileFeatures(siteType, input);
+    validateNonWebFeatures(siteType, input);
 
     if (IS_CLOUD) {
       const subscription = await getSubscriptionInner(input.organizationId);
@@ -290,7 +308,7 @@ class SiteConfigurationLifecycle {
     if (input.domain !== undefined || input.type !== undefined) {
       validateSiteIdentity(nextSiteType, domain);
     }
-    validateMobileFeatures(nextSiteType, input);
+    validateNonWebFeatures(nextSiteType, input);
 
     if (IS_CLOUD && input.sessionReplay === true) {
       const subscription = site.organizationId ? await getSubscriptionInner(site.organizationId) : null;
@@ -324,7 +342,7 @@ class SiteConfigurationLifecycle {
     if (input.domain !== undefined) {
       updateData.domain = domain;
     }
-    if (nextSiteType === "mobile") {
+    if (nextSiteType !== "web") {
       updateData.sessionReplay = false;
       updateData.webVitals = false;
     }

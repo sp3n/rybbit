@@ -16,6 +16,8 @@ import { useSetPageTitle } from "../../../hooks/useSetPageTitle";
 import { MobileSidebar } from "../components/Sidebar/MobileSidebar";
 import { RetentionChart } from "./RetentionChart";
 import { ErrorState } from "../../../components/ErrorState";
+import { useGetSite } from "../../../api/admin/hooks/useSites";
+import { ReconstructedAnalysisExclusionNotice } from "../components/game/GameAnalysisLayout";
 
 // Dynamic color function that creates a smooth gradient based on retention percentage
 const getRetentionColor = (
@@ -60,6 +62,7 @@ const getRetentionColor = (
 export default function RetentionPage() {
   const t = useExtracted();
   useSetPageTitle("Retention");
+  const { data: siteMetadata } = useGetSite();
 
   // State for the retention mode (day or week)
   const [mode, setMode] = useState<RetentionMode>("week");
@@ -181,6 +184,7 @@ export default function RetentionPage() {
   if (data && (!data.cohorts || cohortKeys.length === 0)) {
     return (
       <div className="p-2 md:p-4 max-w-[1300px] mx-auto flex flex-col gap-3">
+        {siteMetadata?.type === "game" && <ReconstructedAnalysisExclusionNotice />}
         <NothingFound
           icon={<ChartColumnDecreasing className="w-10 h-10" />}
           title={t("No retention data available")}
@@ -198,6 +202,7 @@ export default function RetentionPage() {
       <div className="p-2 md:p-4 max-w-[1300px] mx-auto flex flex-col gap-3">
         {/* Single Card containing both chart and grid */}
         <FilterControls />
+        {siteMetadata?.type === "game" && <ReconstructedAnalysisExclusionNotice />}
         <Card className="overflow-visible">
           <CardHeader className="flex flex-row items-center justify-between pb-2">
             <CardTitle>{t("Retention")}</CardTitle>

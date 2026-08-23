@@ -72,6 +72,8 @@ describe("processResults", () => {
           user_id: "67890",
           identified_user_id: "111",
           effective_user_id: "222",
+          build_version: "0.6",
+          latest_build: "1",
           site_id: "999",
         },
       ])
@@ -83,6 +85,8 @@ describe("processResults", () => {
         user_id: "67890",
         identified_user_id: "111",
         effective_user_id: "222",
+        build_version: "0.6",
+        latest_build: "1",
         site_id: 999,
       },
     ]);

@@ -1,6 +1,7 @@
 import { FastifyReply, FastifyRequest } from "fastify";
 import { analyticsRoute, runAnalyticsQuery } from "./utils/analyticsQuery.js";
 import { effectiveUserId } from "./utils/effectiveUserId.js";
+import { excludeLegacyReconstructedEvents } from "./utils/reconstructedData.js";
 
 // Define the expected shape of a single data row from the query
 interface RetentionDataRow {
@@ -39,6 +40,7 @@ WITH UserFirstPeriod AS (
     WHERE site_id = {siteId:UInt16}
     -- Use the configurable time range
     AND timestamp >= addDays(today(), -{timeRange:UInt16})
+    ${excludeLegacyReconstructedEvents}
     GROUP BY effective_user_id
 ),
 PeriodActivity AS (
@@ -49,6 +51,7 @@ PeriodActivity AS (
     WHERE site_id = {siteId:UInt16}
     -- Match the date range filter
     AND timestamp >= addDays(today(), -{timeRange:UInt16})
+    ${excludeLegacyReconstructedEvents}
 ),
 CohortRetention AS (
     SELECT
