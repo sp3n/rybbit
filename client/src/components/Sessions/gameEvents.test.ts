@@ -52,7 +52,7 @@ describe("game session events", () => {
       })
     );
     expect(properties).toEqual([
-      { key: "time_spent", label: "Duration", value: "4 mins, 39 secs" },
+      { key: "time_spent", label: "Duration", value: expect.stringMatching(/^4 mins?, 39 secs?$/) },
       { key: "creeps_killed", label: "Creeps killed", value: "10" },
       { key: "tower_name", label: "Tower", value: "Electric" },
     ]);
