@@ -4,9 +4,10 @@
 # user-managed values are DISABLE_SIGNUP, DISABLE_TELEMETRY, MAPBOX_TOKEN, and
 # CLUSTER_WORKERS; each has a safe default except the optional Mapbox token.
 #
-# ClickHouse intentionally remains on the currently deployed 25.4.2 image for
-# the Rybbit 2.8 application cutover. Upgrade the database engine separately so
-# application and database rollback paths remain independent.
+# ClickHouse is pinned to the same 26.3 LTS patch used by the upstream Rybbit
+# 2.8 stack and our production-data upgrade rehearsal. Before changing this
+# version, take a stopped-volume backup so rollback restores both the old image
+# and its matching pre-upgrade data directory.
 
 services:
   rybbit:
@@ -82,7 +83,7 @@ services:
     restart: unless-stopped
 
   rybbit_clickhouse:
-    image: "clickhouse/clickhouse-server:25.4.2"
+    image: "clickhouse/clickhouse-server:26.3.17.4"
     environment:
       - CLICKHOUSE_DB=${CLICKHOUSE_DB:-analytics}
       - CLICKHOUSE_USER=${CLICKHOUSE_USER:-default}
