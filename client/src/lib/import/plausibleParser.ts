@@ -1,7 +1,8 @@
-import JSZip from "jszip";
-import Papa from "papaparse";
 import { DateTime } from "luxon";
 import { authedFetch } from "@/api/utils";
+import { parsePlausibleArchive } from "./plausibleArchive";
+import { buildLegacyAggregateGameImport, inspectParsedPlausibleArchive } from "./plausibleLegacyGame";
+import { PlausibleSyntheticEvent } from "./plausibleTypes";
 
 interface DistEntry<T> {
   value: T;
@@ -35,27 +36,6 @@ interface SourceInfo {
   utm_campaign: string;
   utm_content: string;
   utm_term: string;
-}
-
-interface PlausibleSyntheticEvent {
-  timestamp: string;
-  session_id: string;
-  user_id: string;
-  hostname: string;
-  pathname: string;
-  querystring: string;
-  referrer: string;
-  browser: string;
-  browser_version: string;
-  operating_system: string;
-  operating_system_version: string;
-  device_type: string;
-  country: string;
-  region: string;
-  city: string;
-  type: string;
-  event_name: string;
-  props: string;
 }
 
 type DailyDist<T> = Map<string, DistEntry<T>[]>;
@@ -95,17 +75,14 @@ const SECONDS_IN_DAY = 86400;
 const DEFAULT_PAGE_GAP_SECONDS = 30;
 
 // Simple deterministic pseudo-random based on index
-function deterministicPick<T>(
-  items: DistEntry<T>[],
-  index: number
-): T {
+function deterministicPick<T>(items: DistEntry<T>[], index: number): T {
   if (items.length === 0) {
     throw new Error("Cannot pick from empty distribution");
   }
   const totalWeight = items.reduce((sum, item) => sum + item.weight, 0);
   if (totalWeight === 0) return items[0].value;
   // Use a prime multiplier for better distribution
-  const position = ((index * 7919) % totalWeight + totalWeight) % totalWeight;
+  const position = (((index * 7919) % totalWeight) + totalWeight) % totalWeight;
   let cumulative = 0;
   for (const item of items) {
     cumulative += item.weight;
@@ -123,30 +100,18 @@ function generateUUID(seed1: number, seed2: number): string {
   const b = hex(seed2);
   const c = hex(seed1 + seed2);
   const d = hex(seed1 * 3 + seed2 * 7);
-  return `${a}-${b.slice(0, 4)}-4${b.slice(5, 8)}-${c.slice(0, 4)}-${d}${c.slice(4, 8)}`.slice(
-    0,
-    36
-  );
+  return `${a}-${b.slice(0, 4)}-4${b.slice(5, 8)}-${c.slice(0, 4)}-${d}${c.slice(4, 8)}`.slice(0, 36);
 }
 
-function identifyFile(
-  headers: string[]
-): string | null {
+function identifyFile(headers: string[]): string | null {
   const headerSet = new Set(headers);
-  if (headerSet.has("browser") && headerSet.has("browser_version"))
-    return "browsers";
-  if (headerSet.has("device") && !headerSet.has("browser"))
-    return "devices";
-  if (headerSet.has("operating_system") && headerSet.has("operating_system_version"))
-    return "operating_systems";
-  if (headerSet.has("country") && headerSet.has("region") && headerSet.has("city"))
-    return "locations";
-  if (headerSet.has("source") && headerSet.has("utm_source"))
-    return "sources";
-  if (headerSet.has("page") && headerSet.has("hostname"))
-    return "pages";
-  if (headerSet.has("name") && headerSet.has("visitors") && headerSet.has("events"))
-    return "custom_events";
+  if (headerSet.has("browser") && headerSet.has("browser_version")) return "browsers";
+  if (headerSet.has("device") && !headerSet.has("browser")) return "devices";
+  if (headerSet.has("operating_system") && headerSet.has("operating_system_version")) return "operating_systems";
+  if (headerSet.has("country") && headerSet.has("region") && headerSet.has("city")) return "locations";
+  if (headerSet.has("source") && headerSet.has("utm_source")) return "sources";
+  if (headerSet.has("page") && headerSet.has("hostname")) return "pages";
+  if (headerSet.has("name") && headerSet.has("visitors") && headerSet.has("events")) return "custom_events";
   if (headerSet.has("entry_page")) return "entry_pages";
   if (headerSet.has("exit_page")) return "exit_pages";
   if (
@@ -159,8 +124,7 @@ function identifyFile(
     !headerSet.has("country")
   )
     return "visitors";
-  if (headerSet.has("property") && headerSet.has("value"))
-    return "custom_props";
+  if (headerSet.has("property") && headerSet.has("value")) return "custom_props";
   return null;
 }
 
@@ -250,25 +214,20 @@ export class PlausibleCsvParser {
   private readonly importId: string;
   private readonly earliestAllowedDate: DateTime;
   private readonly latestAllowedDate: DateTime;
+  private readonly excludeLegacyFinalDay: boolean;
 
   constructor(
     siteId: number,
     importId: string,
     earliestAllowedDate: string,
-    latestAllowedDate: string
+    latestAllowedDate: string,
+    options: { excludeLegacyFinalDay?: boolean } = {}
   ) {
     this.siteId = siteId;
     this.importId = importId;
-    this.earliestAllowedDate = DateTime.fromFormat(
-      earliestAllowedDate,
-      "yyyy-MM-dd",
-      { zone: "utc" }
-    ).startOf("day");
-    this.latestAllowedDate = DateTime.fromFormat(
-      latestAllowedDate,
-      "yyyy-MM-dd",
-      { zone: "utc" }
-    ).endOf("day");
+    this.earliestAllowedDate = DateTime.fromFormat(earliestAllowedDate, "yyyy-MM-dd", { zone: "utc" }).startOf("day");
+    this.latestAllowedDate = DateTime.fromFormat(latestAllowedDate, "yyyy-MM-dd", { zone: "utc" }).endOf("day");
+    this.excludeLegacyFinalDay = options.excludeLegacyFinalDay !== false;
 
     if (!this.earliestAllowedDate.isValid || !this.latestAllowedDate.isValid) {
       this.cancelled = true;
@@ -284,24 +243,32 @@ export class PlausibleCsvParser {
 
     try {
       // Phase 1: Extract CSVs from ZIP
-      const zip = await JSZip.loadAsync(file);
+      const archive = await parsePlausibleArchive(file);
+      const inspection = inspectParsedPlausibleArchive(archive);
+
+      if (inspection.kind === "legacy_game_aggregate") {
+        const legacyImport = buildLegacyAggregateGameImport(archive, file.name || "plausible-export.zip", {
+          earliestAllowedDate: this.earliestAllowedDate.toFormat("yyyy-MM-dd"),
+          latestAllowedDate: this.latestAllowedDate.toFormat("yyyy-MM-dd"),
+          excludeLastDay: this.excludeLegacyFinalDay,
+        });
+        for (let start = 0; start < legacyImport.events.length; start += CHUNK_SIZE) {
+          if (this.cancelled) return;
+          await this.uploadChunk(legacyImport.events.slice(start, start + CHUNK_SIZE), false);
+        }
+        await this.uploadChunk([], true);
+        return;
+      }
+
       const csvFiles = new Map<string, Record<string, string>[]>();
 
-      for (const [filename, zipEntry] of Object.entries(zip.files)) {
+      for (const parsed of archive.values()) {
         if (this.cancelled) return;
-        if (zipEntry.dir || !filename.endsWith(".csv")) continue;
+        if (parsed.rows.length === 0) continue;
 
-        const csvText = await zipEntry.async("string");
-        const parsed = Papa.parse<Record<string, string>>(csvText, {
-          header: true,
-          skipEmptyLines: "greedy",
-        });
-
-        if (parsed.data.length === 0 || !parsed.meta.fields) continue;
-
-        const fileType = identifyFile(parsed.meta.fields);
+        const fileType = identifyFile(parsed.headers);
         if (fileType) {
-          csvFiles.set(fileType, parsed.data);
+          csvFiles.set(fileType, parsed.rows);
         }
       }
 
@@ -315,43 +282,43 @@ export class PlausibleCsvParser {
       // Phase 2: Build daily distributions
       const browserDist = this.buildDist<BrowserInfo>(
         csvFiles.get("browsers"),
-        (row) => ({
+        row => ({
           browser: normalizeBrowser(row.browser || ""),
           browser_version: row.browser_version || "",
         }),
-        (row) => parseInt(row.pageviews || "0", 10)
+        row => parseInt(row.pageviews || "0", 10)
       );
 
       const deviceDist = this.buildDist<DeviceInfo>(
         csvFiles.get("devices"),
-        (row) => ({ device_type: normalizeDevice(row.device || "") }),
-        (row) => parseInt(row.pageviews || "0", 10)
+        row => ({ device_type: normalizeDevice(row.device || "") }),
+        row => parseInt(row.pageviews || "0", 10)
       );
 
       const osDist = this.buildDist<OsInfo>(
         csvFiles.get("operating_systems"),
-        (row) => ({
+        row => ({
           operating_system: normalizeOs(row.operating_system || ""),
           operating_system_version: row.operating_system_version || "",
         }),
-        (row) => parseInt(row.pageviews || "0", 10)
+        row => parseInt(row.pageviews || "0", 10)
       );
 
       const locationDist = this.buildDist<LocationInfo>(
         csvFiles.get("locations"),
-        (row) => ({
+        row => ({
           country: row.country || "",
           region: row.region || "",
           // Plausible exports city as a numeric Geonames ID (e.g. "2654264"), not a name.
           // We have no lookup table, so drop it rather than store a fake city name.
           city: "",
         }),
-        (row) => parseInt(row.pageviews || "0", 10)
+        row => parseInt(row.pageviews || "0", 10)
       );
 
       const sourceDist = this.buildDist<SourceInfo>(
         csvFiles.get("sources"),
-        (row) => ({
+        row => ({
           referrer: buildReferrerUrl(row.source || "", row.referrer || ""),
           utm_source: row.utm_source || "",
           utm_medium: row.utm_medium || "",
@@ -359,14 +326,14 @@ export class PlausibleCsvParser {
           utm_content: row.utm_content || "",
           utm_term: row.utm_term || "",
         }),
-        (row) => parseInt(row.pageviews || "0", 10)
+        row => parseInt(row.pageviews || "0", 10)
       );
 
       // Custom-event rows have no hostname column, so derive one from the pages CSV.
       const hostnameDist = this.buildDist<string>(
         pagesData,
-        (row) => row.hostname || "",
-        (row) => parseInt(row.pageviews || "0", 10)
+        row => row.hostname || "",
+        row => parseInt(row.pageviews || "0", 10)
       );
       let hostnameFallback = "";
       let hostnameFallbackWeight = 0;
@@ -466,8 +433,7 @@ export class PlausibleCsvParser {
 
         for (let i = 0; i < pageviews; i++) {
           const session = this.pickSessionForPageview(pool);
-          const offsetSeconds =
-            session.startSeconds + session.pagesUsed * session.perPageSeconds;
+          const offsetSeconds = session.startSeconds + session.pagesUsed * session.perPageSeconds;
           const timestamp = formatTimestamp(date, offsetSeconds);
 
           buffer.push({
@@ -595,12 +561,7 @@ export class PlausibleCsvParser {
     return dist;
   }
 
-  private pickFromDist<T>(
-    dist: DailyDist<T>,
-    date: string,
-    index: number,
-    fallback: T
-  ): T {
+  private pickFromDist<T>(dist: DailyDist<T>, date: string, index: number, fallback: T): T {
     const entries = dist.get(date);
     if (!entries || entries.length === 0) return fallback;
     return deterministicPick(entries, index);
@@ -646,9 +607,7 @@ export class PlausibleCsvParser {
     const sessions: Session[] = [];
     for (let i = 0; i < numSessions; i++) {
       const isBounce = i < numBounces;
-      const budget = isBounce
-        ? 1
-        : Math.max(1, baseNonBounce + (i - numBounces < extraNonBounce ? 1 : 0));
+      const budget = isBounce ? 1 : Math.max(1, baseNonBounce + (i - numBounces < extraNonBounce ? 1 : 0));
 
       const startSeconds = Math.floor((i * SECONDS_IN_DAY) / numSessions);
       const avgDurationSeconds = visitorsRowDuration > 0 ? visitorsRowDuration / numSessions : 0;
@@ -741,22 +700,15 @@ export class PlausibleCsvParser {
     return date >= this.earliestAllowedDate && date <= this.latestAllowedDate;
   }
 
-  private async uploadChunk(
-    events: PlausibleSyntheticEvent[],
-    isLastBatch: boolean
-  ): Promise<void> {
+  private async uploadChunk(events: PlausibleSyntheticEvent[], isLastBatch: boolean): Promise<void> {
     if (events.length === 0 && !isLastBatch) return;
 
-    await authedFetch(
-      `/sites/${this.siteId}/imports/${this.importId}/events`,
-      undefined,
-      {
-        method: "POST",
-        data: {
-          events,
-          isLastBatch,
-        },
-      }
-    );
+    await authedFetch(`/sites/${this.siteId}/imports/${this.importId}/events`, undefined, {
+      method: "POST",
+      data: {
+        events,
+        isLastBatch,
+      },
+    });
   }
 }

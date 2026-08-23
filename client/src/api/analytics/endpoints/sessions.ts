@@ -45,6 +45,15 @@ export type GetSessionsResponse = {
   lat: number;
   lon: number;
   has_replay: number;
+  game_platform: string;
+  game_build_version: string;
+  game_play_mode: string;
+  game_difficulty: string;
+  game_play_session_id: string;
+  game_actions: number;
+  game_reconstructed: number;
+  first_game_event: string;
+  last_game_event: string;
 }[];
 
 // Session details type
@@ -122,6 +131,7 @@ export interface SessionsParams extends CommonApiParams, PaginationParams {
   identifiedOnly?: boolean;
   minPageviews?: number;
   minEvents?: number;
+  minGameActions?: number;
   minDuration?: number;
 }
 
@@ -149,51 +159,10 @@ export async function fetchSessions(
     identified_only: params.identifiedOnly,
     min_pageviews: params.minPageviews,
     min_events: params.minEvents,
+    min_game_actions: params.minGameActions,
     min_duration: params.minDuration,
   };
 
-  const response = await authedFetch<{ data: GetSessionsResponse }>(
-    `/sites/${site}/sessions`,
-    queryParams
-  );
+  const response = await authedFetch<{ data: GetSessionsResponse }>(`/sites/${site}/sessions`, queryParams);
   return response;
-}
-
-/**
- * Fetch details of a specific session
- * GET /api/sessions/:sessionId/:site
- */
-export async function fetchSession(
-  site: string | number,
-  params: SessionDetailsParams
-): Promise<{ data: SessionPageviewsAndEvents }> {
-  const queryParams: Record<string, any> = {
-    limit: params.limit,
-    offset: params.offset,
-  };
-
-  if (params.minutes) {
-    queryParams.minutes = params.minutes;
-  }
-
-  const response = await authedFetch<{ data: SessionPageviewsAndEvents }>(
-    `/sites/${site}/sessions/${params.sessionId}`,
-    queryParams
-  );
-  return response;
-}
-
-/**
- * Fetch session locations for map visualization
- * GET /api/session-locations/:site
- */
-export async function fetchSessionLocations(
-  site: string | number,
-  params: CommonApiParams
-): Promise<LiveSessionLocation[]> {
-  const response = await authedFetch<{ data: LiveSessionLocation[] }>(
-    `/sites/${site}/session-locations`,
-    toQueryParams(params)
-  );
-  return response.data;
 }

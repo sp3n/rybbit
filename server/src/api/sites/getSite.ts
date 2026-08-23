@@ -3,6 +3,8 @@ import { FastifyReply, FastifyRequest } from "fastify";
 import { db } from "../../db/postgres/postgres.js";
 import { sites } from "../../db/postgres/schema.js";
 import { getUserHasAdminAccessToSite } from "../../lib/auth-utils.js";
+import { hasFeatureFlagsForRuntime } from "../../services/featureFlags/definitions.js";
+import { usageService } from "../../services/usageService.js";
 
 interface GetSiteParams {
   Params: {
@@ -25,24 +27,30 @@ export async function getSite(request: FastifyRequest<GetSiteParams>, reply: Fas
 
     // Check if user has admin access
     const isOwner = await getUserHasAdminAccessToSite(request, site.siteId);
+    const sessionReplay =
+      site.type && site.type !== "web" ? false : site.sessionReplay && !usageService.isSiteWithoutReplay(site.siteId);
+    const featureFlagsEnabled = await hasFeatureFlagsForRuntime(site.siteId, "client");
 
     return reply.status(200).send({
       id: site.id,
       siteId: site.siteId,
       name: site.name,
-      domain: site.domain,
+      type: site.type || "web",
+      domain: site.domain || "",
       createdAt: site.createdAt,
       updatedAt: site.updatedAt,
       createdBy: site.createdBy,
       organizationId: site.organizationId,
       saltUserIds: site.saltUserIds,
       public: site.public,
+      embedEnabled: site.embedEnabled,
       blockBots: site.blockBots,
+      firstPartyProxy: site.firstPartyProxy,
       trackIp: site.trackIp,
       isOwner: isOwner,
       // Analytics features
-      sessionReplay: site.sessionReplay,
-      webVitals: site.webVitals,
+      sessionReplay,
+      webVitals: site.type && site.type !== "web" ? false : site.webVitals,
       trackErrors: site.trackErrors,
       trackOutbound: site.trackOutbound,
       trackUrlParams: site.trackUrlParams,
@@ -51,9 +59,10 @@ export async function getSite(request: FastifyRequest<GetSiteParams>, reply: Fas
       trackButtonClicks: site.trackButtonClicks,
       trackCopy: site.trackCopy,
       trackFormInteractions: site.trackFormInteractions,
+      featureFlagsEnabled,
     });
   } catch (error) {
-    console.error("Error retrieving site:", error);
+    request.log.error({ err: error }, "Error retrieving site");
     return reply.status(500).send({ error: "Internal server error" });
   }
 }

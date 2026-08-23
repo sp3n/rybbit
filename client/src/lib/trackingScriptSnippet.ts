@@ -1,4 +1,4 @@
-type TrackingScriptSiteConfig = {
+export type TrackingScriptSiteConfig = {
   id?: string | null;
   siteId?: string | number | null;
   sessionReplay?: boolean;
@@ -11,13 +11,16 @@ type TrackingScriptSiteConfig = {
   trackButtonClicks?: boolean;
   trackCopy?: boolean;
   trackFormInteractions?: boolean;
+  featureFlagsEnabled?: boolean;
 };
 
-type TrackingScriptOptions = {
+export type TrackingScriptOptions = {
   debounceValue?: number;
   skipPatterns?: string[];
   maskPatterns?: string[];
 };
+
+export type TrackingScriptAttribute = [string, string];
 
 const booleanAttributes: Array<[keyof TrackingScriptSiteConfig, string, boolean]> = [
   ["sessionReplay", "data-session-replay", false],
@@ -30,42 +33,53 @@ const booleanAttributes: Array<[keyof TrackingScriptSiteConfig, string, boolean]
   ["trackButtonClicks", "data-track-button-clicks", false],
   ["trackCopy", "data-track-copy", false],
   ["trackFormInteractions", "data-track-form-interactions", false],
+  ["featureFlagsEnabled", "data-feature-flags-enabled", false],
 ];
 
-function booleanAttributeLines(siteConfig: TrackingScriptSiteConfig) {
-  return booleanAttributes
-    .map(([key, attributeName, defaultValue]) => {
-      const value = siteConfig[key] ?? defaultValue;
-      return `    ${attributeName}="${value}"`;
-    })
-    .join("\n");
+// Use single quotes for attribute values that contain double quotes (JSON arrays).
+export function formatTrackingScriptAttribute([key, value]: TrackingScriptAttribute) {
+  return value.includes('"') ? `${key}='${value}'` : `${key}="${value}"`;
+}
+
+export function getTrackingScriptDataAttributes(
+  siteConfig: TrackingScriptSiteConfig,
+  { debounceValue = 500, skipPatterns = [], maskPatterns = [] }: TrackingScriptOptions = {}
+): TrackingScriptAttribute[] {
+  const siteId = siteConfig.id ?? siteConfig.siteId;
+  const attributes: TrackingScriptAttribute[] = [
+    ["data-site-id", String(siteId)],
+    ...booleanAttributes.map(
+      ([key, attributeName, defaultValue]) =>
+        [attributeName, String(siteConfig[key] ?? defaultValue)] as TrackingScriptAttribute
+    ),
+  ];
+
+  if (debounceValue !== 500) {
+    attributes.push(["data-debounce", String(debounceValue)]);
+  }
+  if (skipPatterns.length > 0) {
+    attributes.push(["data-skip-patterns", JSON.stringify(skipPatterns)]);
+  }
+  if (maskPatterns.length > 0) {
+    attributes.push(["data-mask-patterns", JSON.stringify(maskPatterns)]);
+  }
+
+  return attributes;
 }
 
 export function buildTrackingScriptSnippet(
   siteConfig: TrackingScriptSiteConfig,
   { debounceValue = 500, skipPatterns = [], maskPatterns = [] }: TrackingScriptOptions = {}
 ) {
-  const siteId = siteConfig.id ?? siteConfig.siteId;
+  const dataAttributes = getTrackingScriptDataAttributes(siteConfig, {
+    debounceValue,
+    skipPatterns,
+    maskPatterns,
+  });
 
   return `<script
     src="${globalThis.location.origin}/api/script.js"
-    data-site-id="${siteId}"
-${booleanAttributeLines(siteConfig)}${
-    debounceValue !== 500
-      ? `
-    data-debounce="${debounceValue}"`
-      : ""
-  }${
-    skipPatterns.length > 0
-      ? `
-    data-skip-patterns='${JSON.stringify(skipPatterns)}'`
-      : ""
-  }${
-    maskPatterns.length > 0
-      ? `
-    data-mask-patterns='${JSON.stringify(maskPatterns)}'`
-      : ""
-  }
+${dataAttributes.map(attribute => `    ${formatTrackingScriptAttribute(attribute)}`).join("\n")}
     defer
 ></script>`;
 }

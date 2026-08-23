@@ -1,8 +1,11 @@
 import { FilterParams } from "@rybbit/shared";
 import { FastifyReply, FastifyRequest } from "fastify";
-import { clickhouse } from "../../../db/clickhouse/clickhouse.js";
 import { getFilterStatement } from "../utils/getFilterStatement.js";
-import { enrichWithTraits, getTimeStatement, processResults } from "../utils/utils.js";
+import { SESSION_CHANNEL_AGG, SESSION_REFERRER_AGG } from "../utils/sessionAttribution.js";
+import { enrichWithTraits } from "../utils/utils.js";
+import { getTimeStatement } from "../utils/timeWindow.js";
+import { analyticsRoute, runAnalyticsQuery, QuerySpec } from "../utils/analyticsQuery.js";
+import { matchesUser } from "../utils/effectiveUserId.js";
 
 export type GetSessionsResponse = {
   session_id: string;
@@ -47,6 +50,15 @@ export type GetSessionsResponse = {
   lat: number;
   lon: number;
   has_replay: number;
+  game_platform: string;
+  game_build_version: string;
+  game_play_mode: string;
+  game_difficulty: string;
+  game_play_session_id: string;
+  game_actions: number;
+  game_reconstructed: number;
+  first_game_event: string;
+  last_game_event: string;
 }[];
 
 export interface GetSessionsRequest {
@@ -57,11 +69,11 @@ export interface GetSessionsRequest {
     limit: number;
     page: number;
     user_id?: string;
-    session_id?: string
-    ;
+    session_id?: string;
     identified_only?: string;
     min_pageviews?: string;
     min_events?: string;
+    min_game_actions?: string;
     min_duration?: string;
   }>;
 }
@@ -75,7 +87,67 @@ const SESSION_FIELD_MAPPINGS = {
   "url_parameters['utm_content']": "utm_content",
 };
 
-export async function getSessions(req: FastifyRequest<GetSessionsRequest>, res: FastifyReply) {
+const gamePropertyString = (property: string) => `
+  coalesce(
+    nullIf(JSONExtractString(toString(props), '${property}'), ''),
+    nullIf(replaceRegexpAll(JSONExtractRaw(toString(props), '${property}'), '^"|"$', ''), '')
+  )`;
+
+const explicitGamePlatform = `coalesce(${gamePropertyString("platform_code")}, ${gamePropertyString("platform")})`;
+
+/**
+ * Prefer the explicit game context emitted by current integrations, then decode
+ * the synthetic UA versions used by legacy RybbitHole releases. Keeping the
+ * fallback here lets production exports become useful immediately, without a
+ * destructive telemetry backfill.
+ */
+export const buildGameSessionContextSelect = () => `
+          nullIf(argMaxIf(${explicitGamePlatform}, timestamp, type IN ('custom_event', 'pageview')), '') AS game_platform_explicit,
+          coalesce(
+            nullIf(argMaxIf(${gamePropertyString("build_version")}, timestamp, type IN ('custom_event', 'pageview')), ''),
+            nullIf(argMaxIf(${gamePropertyString("version")}, timestamp, type IN ('custom_event', 'pageview')), ''),
+            ''
+          ) AS game_build_version,
+          coalesce(
+            nullIf(argMaxIf(${gamePropertyString("play_mode")}, timestamp, type IN ('custom_event', 'pageview')), ''),
+            nullIf(argMaxIf(${gamePropertyString("local_play_mode")}, timestamp, type IN ('custom_event', 'pageview')), ''),
+            ''
+          ) AS game_play_mode,
+          coalesce(nullIf(argMaxIf(${gamePropertyString("difficulty")}, timestamp, type IN ('custom_event', 'pageview')), ''), '') AS game_difficulty,
+          coalesce(nullIf(argMaxIf(${gamePropertyString("play_session_id")}, timestamp, type IN ('custom_event', 'pageview')), ''), '') AS game_play_session_id,
+          uniqExactIf(
+            tuple(timestamp, if(event_name != '', event_name, pathname)),
+            type IN ('custom_event', 'pageview')
+          ) AS game_actions,
+          toUInt8(
+            countIf(
+              type IN ('custom_event', 'pageview')
+              AND lower(coalesce(${gamePropertyString("legacy_reconstructed")}, 'false')) = 'true'
+            ) > 0
+          ) AS game_reconstructed,
+          argMinIf(if(event_name != '', event_name, pathname), timestamp, type IN ('custom_event', 'pageview')) AS first_game_event,
+          argMaxIf(if(event_name != '', event_name, pathname), timestamp, type IN ('custom_event', 'pageview')) AS last_game_event`;
+
+const buildResolvedGamePlatformSelect = () => `
+      coalesce(
+        game_platform_explicit,
+        multiIf(
+          operating_system = 'PlayStation' AND operating_system_version = '5Pro', 'PS5Pro',
+          operating_system = 'PlayStation' AND operating_system_version = '5Eco', 'PS5Eco',
+          operating_system = 'PlayStation' AND operating_system_version = '5', 'PS5',
+          operating_system = 'Xbox' AND operating_system_version = 'Series X', 'XSX',
+          operating_system = 'Xbox' AND operating_system_version = 'Series S', 'XSS',
+          browser_version = '402', 'XboxPC',
+          browser_version = '403', 'XboxPCh',
+          browser_version = '100', 'Steam',
+          browser_version = '101', 'SteamDeck',
+          browser_version = '102', 'EGS',
+          browser_version = '900', 'Editor',
+          'Unknown'
+        )
+      ) AS game_platform`;
+
+export const buildSessionsQuery = (query: GetSessionsRequest["Querystring"], siteId: number): QuerySpec => {
   const {
     filters,
     page = 1,
@@ -85,25 +157,28 @@ export async function getSessions(req: FastifyRequest<GetSessionsRequest>, res: 
     identified_only: identifiedOnly = "false",
     min_pageviews: minPageviewsStr,
     min_events: minEventsStr,
+    min_game_actions: minGameActionsStr,
     min_duration: minDurationStr,
-  } = req.query;
-  const site = req.params.siteId;
+  } = query;
   const filterIdentified = identifiedOnly === "true";
   const minPageviews = minPageviewsStr ? parseInt(minPageviewsStr, 10) : undefined;
   const minEvents = minEventsStr ? parseInt(minEventsStr, 10) : undefined;
+  const minGameActions = minGameActionsStr ? parseInt(minGameActionsStr, 10) : undefined;
   const minDuration = minDurationStr ? parseInt(minDurationStr, 10) : undefined;
 
-  const timeStatement = getTimeStatement(req.query);
+  const timeStatement = getTimeStatement(query);
 
   // Use composable filter options:
-  // - sessionLevelParams: pathname and page_title filter at session level (finds sessions that visited a page)
+  // - sessionLevelParams: per-event fields filter at session level (finds sessions
+  //   containing a matching event) — required for any parameter the aggregated CTE
+  //   below doesn't project, otherwise the outer WHERE hits an unknown identifier
   // - fieldMappings: CTE extracts UTM params as separate columns, so we need to map the field names
-  const filterStatement = getFilterStatement(filters, Number(site), timeStatement, {
-    sessionLevelParams: ["event_name", "pathname", "page_title", "channel"],
+  const filterStatement = getFilterStatement(filters, siteId, timeStatement, {
+    sessionLevelParams: ["event_name", "pathname", "page_title", "querystring", "channel"],
     fieldMappings: SESSION_FIELD_MAPPINGS,
   });
 
-  const query = `
+  const querySQL = `
   WITH AggregatedSessions AS (
       SELECT
           session_id,
@@ -120,8 +195,8 @@ export async function getSessions(req: FastifyRequest<GetSessionsRequest>, res: 
           argMax(operating_system_version, timestamp) AS operating_system_version,
           argMax(screen_width, timestamp) AS screen_width,
           argMax(screen_height, timestamp) AS screen_height,
-          argMin(referrer, timestamp) AS referrer,
-          argMin(channel, timestamp) AS channel,
+          ${SESSION_REFERRER_AGG} AS referrer,
+          ${SESSION_CHANNEL_AGG} AS channel,
           argMin(hostname, timestamp) AS hostname,
           argMin(url_parameters, timestamp)['utm_source'] AS utm_source,
           argMin(url_parameters, timestamp)['utm_medium'] AS utm_medium,
@@ -144,20 +219,28 @@ export async function getSessions(req: FastifyRequest<GetSessionsRequest>, res: 
           argMax(ip, timestamp) AS ip,
           argMax(lat, timestamp) AS lat,
           argMax(lon, timestamp) AS lon,
-          argMax(tag, timestamp) AS tag
+          argMax(tag, timestamp) AS tag,
+          argMax(timezone, timestamp) AS timezone,
+          ${buildGameSessionContextSelect()}
       FROM events
       WHERE
           site_id = {siteId:Int32}
-          ${userId ? ` AND (events.user_id = {user_id:String} OR events.identified_user_id = {user_id:String})` : ""}
+          ${userId ? ` AND ${matchesUser("{user_id:String}", "events")}` : ""}
           ${sessionId ? ` AND events.session_id = {session_id:String}` : ""}
           ${timeStatement}
       GROUP BY
           session_id
       ORDER BY session_end DESC
   ),
+  GameContextSessions AS (
+      SELECT
+          a.*,
+          ${buildResolvedGamePlatformSelect()}
+      FROM AggregatedSessions a
+  ),
   ReplaySessions AS (
       SELECT DISTINCT session_id
-      FROM session_replay_metadata
+      FROM session_replay_metadata_v2
       FINAL
       WHERE site_id = {siteId:Int32}
         AND event_count >= 2
@@ -165,41 +248,45 @@ export async function getSessions(req: FastifyRequest<GetSessionsRequest>, res: 
   SELECT
       a.*,
       if(r.session_id != '', 1, 0) AS has_replay
-  FROM AggregatedSessions a
+  FROM GameContextSessions a
   LEFT JOIN ReplaySessions r ON a.session_id = r.session_id
   WHERE 1 = 1 ${filterStatement}
   ${filterIdentified ? "AND a.identified_user_id != ''" : ""}
   ${minPageviews !== undefined ? "AND a.pageviews >= {minPageviews:Int32}" : ""}
   ${minEvents !== undefined ? "AND a.events >= {minEvents:Int32}" : ""}
+  ${minGameActions !== undefined ? "AND a.game_actions >= {minGameActions:Int32}" : ""}
   ${minDuration !== undefined ? "AND a.session_duration >= {minDuration:Int32}" : ""}
   LIMIT {limit:Int32} OFFSET {offset:Int32}
   `;
 
-  try {
-    const result = await clickhouse.query({
-      query,
-      format: "JSONEachRow",
-      query_params: {
-        siteId: Number(site),
-        user_id: userId,
-        session_id: sessionId,
-        limit: limit || 100,
-        offset: (page - 1) * (limit || 100),
-        minPageviews: minPageviews ?? 0,
-        minEvents: minEvents ?? 0,
-        minDuration: minDuration ?? 0,
-      },
-    });
+  return {
+    query: querySQL,
+    params: {
+      siteId,
+      user_id: userId,
+      session_id: sessionId,
+      limit: limit || 100,
+      offset: (page - 1) * (limit || 100),
+      minPageviews: minPageviews ?? 0,
+      minEvents: minEvents ?? 0,
+      minGameActions: minGameActions ?? 0,
+      minDuration: minDuration ?? 0,
+    },
+  };
+};
 
-    const data = await processResults<Omit<GetSessionsResponse[number], "traits">>(result);
+export const getSessions = analyticsRoute<GetSessionsRequest>(
+  "sessions",
+  async (req: FastifyRequest<GetSessionsRequest>, res: FastifyReply) => {
+    const site = req.params.siteId;
+
+    const data = await runAnalyticsQuery<Omit<GetSessionsResponse[number], "traits">>(
+      buildSessionsQuery(req.query, Number(site))
+    );
 
     // Enrich with traits from Postgres
     const dataWithTraits = await enrichWithTraits(data, Number(site));
 
     return res.send({ data: dataWithTraits });
-  } catch (error) {
-    console.error("Generated Query:", query);
-    console.error("Error fetching sessions:", error);
-    return res.status(500).send({ error: "Failed to fetch sessions" });
   }
-}
+);

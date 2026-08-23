@@ -1,0 +1,2 @@
+ALTER TABLE "sites" DROP CONSTRAINT "sites_type_check";--> statement-breakpoint
+ALTER TABLE "sites" ADD CONSTRAINT "sites_type_check" CHECK ("sites"."type" IS NULL OR "sites"."type" IN ('web', 'mobile', 'game'));

@@ -1,8 +1,8 @@
 import { FastifyReply, FastifyRequest } from "fastify";
-import { clickhouse } from "../../db/clickhouse/clickhouse.js";
-import { getTimeStatement, processResults } from "./utils/utils.js";
+import { getTimeStatement } from "./utils/timeWindow.js";
 import { FilterParams } from "@rybbit/shared";
 import { getFilterStatement } from "./utils/getFilterStatement.js";
+import { analyticsRoute, getPaginationStatements, runAnalyticsQuery, runPaginatedQuery } from "./utils/analyticsQuery.js";
 
 interface GetPageTitlesRequest {
   Params: {
@@ -20,6 +20,8 @@ export type PageTitleItem = {
   pathname: string;
   count: number;
   percentage: number;
+  pageviews?: number;
+  bounce_rate?: number;
   time_on_page_seconds?: number;
 };
 
@@ -29,36 +31,34 @@ type PageTitlesPaginatedResponse = {
   totalCount: number;
 };
 
-const getPageTitlesQuery = (request: FastifyRequest<GetPageTitlesRequest>, isCountQuery: boolean = false) => {
-  const { filters, limit, page } = request.query;
+export const buildPageTitlesQuery = (
+  query: GetPageTitlesRequest["Querystring"],
+  siteId: number,
+  isCountQuery: boolean = false
+) => {
+  const { filters } = query;
 
-  const timeStatement = getTimeStatement(request.query);
-  const filterStatement = getFilterStatement(filters, Number(request.params.siteId), timeStatement);
+  const timeStatement = getTimeStatement(query);
+  const filterStatement = getFilterStatement(filters, siteId, timeStatement);
 
-  let validatedLimit: number | null = null;
-  if (!isCountQuery && limit !== undefined) {
-    const parsedLimit = parseInt(String(limit), 10);
-    if (!isNaN(parsedLimit) && parsedLimit > 0) {
-      validatedLimit = parsedLimit;
-    }
-  }
-  // StandardSection usually shows a small number, e.g., 7 or 10. Let's default to 10 for non-paginated use.
-  const limitStatement = !isCountQuery && validatedLimit ? `LIMIT ${validatedLimit}` : isCountQuery ? "" : "LIMIT 10";
-
-  let validatedOffset: number | null = null;
-  if (!isCountQuery && page !== undefined) {
-    const parsedPage = parseInt(String(page), 10);
-    if (!isNaN(parsedPage) && parsedPage >= 1) {
-      const pageOffset = (parsedPage - 1) * (validatedLimit || 10);
-      validatedOffset = pageOffset;
-    }
-  }
-  const offsetStatement = !isCountQuery && validatedOffset ? `OFFSET ${validatedOffset}` : "";
+  // StandardSection usually shows a small number, e.g., 7 or 10. Default to 10 for non-paginated use.
+  const { limitStatement, offsetStatement } = getPaginationStatements(query, 10, isCountQuery);
 
   // For page_title, we want to count distinct sessions that viewed this title.
   // We also need a representative pathname and calculate average time on page.
   // Using argMax to get the pathname from the most recent event for that title in a session.
   const baseCteQuery = `
+    SessionPageCounts AS (
+        SELECT
+            session_id,
+            COUNT() as pageviews_in_session
+        FROM events
+        WHERE
+            site_id = {siteId:Int32}
+            AND type = 'pageview'
+            ${timeStatement}
+        GROUP BY session_id
+    ),
     EventTimes AS (
         SELECT
             session_id,
@@ -77,19 +77,23 @@ const getPageTitlesQuery = (request: FastifyRequest<GetPageTitlesRequest>, isCou
     ),
     PageDurations AS (
         SELECT
-            session_id,
-            page_title,
-            pathname,
-            timestamp,
-            next_timestamp,
-            if(isNull(next_timestamp), 0, dateDiff('second', timestamp, next_timestamp)) as time_diff_seconds
-        FROM EventTimes
+            e.session_id as session_id,
+            e.page_title as page_title,
+            e.pathname as pathname,
+            e.timestamp as timestamp,
+            e.next_timestamp as next_timestamp,
+            if(isNull(e.next_timestamp), 0, dateDiff('second', e.timestamp, e.next_timestamp)) as time_diff_seconds,
+            spc.pageviews_in_session as pageviews_in_session
+        FROM EventTimes e
+        LEFT JOIN SessionPageCounts spc ON e.session_id = spc.session_id
     ),
     PageTitleStats AS (
         SELECT
             page_title as value,
             argMax(pathname, timestamp) as pathname,
             count(DISTINCT session_id) as unique_sessions,
+            count() as pageviews,
+            countIf(DISTINCT session_id, pageviews_in_session = 1) as bounced_sessions,
             avg(if(time_diff_seconds < 0, 0, if(time_diff_seconds > 1800, 1800, time_diff_seconds))) as avg_time_on_page_seconds
         FROM PageDurations
         GROUP BY page_title
@@ -113,6 +117,11 @@ const getPageTitlesQuery = (request: FastifyRequest<GetPageTitlesRequest>, isCou
             unique_sessions * 100.0 / SUM(unique_sessions) OVER (),
             2
         ) as percentage,
+        pageviews,
+        ROUND(
+            bounced_sessions * 100.0 / nullIf(unique_sessions, 0),
+            2
+        ) as bounce_rate,
         avg_time_on_page_seconds as time_on_page_seconds
     FROM PageTitleStats
     ORDER BY count DESC
@@ -121,47 +130,23 @@ const getPageTitlesQuery = (request: FastifyRequest<GetPageTitlesRequest>, isCou
   `;
 };
 
-export async function getPageTitles(req: FastifyRequest<GetPageTitlesRequest>, res: FastifyReply) {
-  const site = req.params.siteId;
-  const { page } = req.query;
+export const getPageTitles = analyticsRoute<GetPageTitlesRequest>(
+  "page titles",
+  async (req: FastifyRequest<GetPageTitlesRequest>, res: FastifyReply) => {
+    const siteId = Number(req.params.siteId);
+    const params = { siteId };
+    const dataSpec = { query: buildPageTitlesQuery(req.query, siteId, false), params };
 
-  const isPaginatedRequest = page !== undefined; // True if page is present
-
-  const dataQuery = getPageTitlesQuery(req, false);
-
-  try {
-    const dataResult = await clickhouse.query({
-      query: dataQuery,
-      format: "JSONEachRow",
-      query_params: {
-        siteId: Number(site),
-      },
-    });
-    const items = await processResults<PageTitleItem>(dataResult);
-
-    if (isPaginatedRequest) {
-      const countQuery = getPageTitlesQuery(req, true);
-      const countResult = await clickhouse.query({
-        query: countQuery,
-        format: "JSONEachRow",
-        query_params: {
-          siteId: Number(site),
-        },
+    if (req.query.page !== undefined) {
+      const result = await runPaginatedQuery<PageTitleItem>(dataSpec, {
+        query: buildPageTitlesQuery(req.query, siteId, true),
+        params,
       });
-      const countData = await processResults<{ totalCount: number }>(countResult);
-      const totalCount = countData.length > 0 ? countData[0].totalCount : 0;
-      return res.send({ data: { data: items, totalCount } });
-    } else {
-      // For non-paginated (StandardSection default) use, return the simpler structure
-      return res.send({ data: items });
+      return res.send({ data: result });
     }
-  } catch (error) {
-    console.error(`Error fetching page titles:`, error);
-    console.error("Failed dataQuery:", dataQuery);
-    if (isPaginatedRequest) {
-      const countQuery = getPageTitlesQuery(req, true);
-      console.error("Failed countQuery:", countQuery);
-    }
-    return res.status(500).send({ error: `Failed to fetch page titles` });
+
+    // For non-paginated (StandardSection default) use, return the simpler structure
+    const items = await runAnalyticsQuery<PageTitleItem>(dataSpec);
+    return res.send({ data: items });
   }
-}
+);

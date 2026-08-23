@@ -6,6 +6,12 @@ on:
       - master
     tags:
       - "v*"
+  pull_request:
+    branches:
+      - master
+    paths-ignore:
+      - "docs/**"
+      - "**.md"
   workflow_dispatch:
 
 jobs:
@@ -59,7 +65,7 @@ jobs:
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
           outputs: type=image,"name=ghcr.io/${{ env.REPO_OWNER }}/rybbit-client",push-by-digest=true,name-canonical=true
-          push: true
+          push: "${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}"
       - name: Export digests
         run: |
           # Create a temporary directory to store digests
@@ -122,7 +128,7 @@ jobs:
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
           outputs: type=image,"name=ghcr.io/${{ env.REPO_OWNER }}/rybbit-backend",push-by-digest=true,name-canonical=true
-          push: true
+          push: "${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}"
       - name: Export digests
         run: |
           # Create a temporary directory to store digests
@@ -143,6 +149,7 @@ jobs:
     needs:
       - build-client
       - build-backend
+    if: "${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}"
     runs-on: ubuntu-latest
 
     steps:
@@ -174,6 +181,9 @@ jobs:
 
             # Add the version tag itself (e.g., v1.2.3)
             ${{ startsWith(github.ref, 'refs/tags/v') && format('type=raw,value={0},priority=900', github.ref_name) || '' }}
+
+            # For pull requests, add PR number tag
+            ${{ github.event_name == 'pull_request' && format('type=raw,value=pr-{0},priority=850', github.event.number) || '' }}
 
             # Always add 'edge' tag for build on latest commit indicator
             type=edge,priority=800
@@ -208,6 +218,9 @@ jobs:
 
             # Add the version tag itself (e.g., v1.2.3)
             ${{ startsWith(github.ref, 'refs/tags/v') && format('type=raw,value={0},priority=900', github.ref_name) || '' }}
+
+            # For pull requests, add PR number tag
+            ${{ github.event_name == 'pull_request' && format('type=raw,value=pr-{0},priority=850', github.event.number) || '' }}
 
             # Always add 'edge' tag for build on latest commit indicator
             type=edge,priority=800

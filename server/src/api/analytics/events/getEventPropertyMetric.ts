@@ -1,9 +1,9 @@
 import { FastifyReply, FastifyRequest } from "fastify";
 import { FilterParams } from "@rybbit/shared";
 
-import { clickhouse } from "../../../db/clickhouse/clickhouse.js";
 import { getFilterStatement } from "../utils/getFilterStatement.js";
-import { getTimeStatement } from "../utils/utils.js";
+import { analyticsRoute, runAnalyticsQuery } from "../utils/analyticsQuery.js";
+import { getTimeStatement } from "../utils/timeWindow.js";
 
 const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 500;
@@ -122,20 +122,17 @@ function mapNumericSummary(row: RawNumericSummary | undefined): EventPropertyNum
   };
 }
 
-export async function getEventPropertyMetric(
-  req: FastifyRequest<GetEventPropertyMetricRequest>,
-  res: FastifyReply
-) {
-  const { event_name: eventName, event_name_like: eventNameLike, filters, limit, page, property_value: propertyValue } =
-    req.query;
-  const site = Number(req.params.siteId);
-  const property = typeof req.query.property === "string" ? req.query.property.trim() : "";
-
-  if (!property) {
-    return res.status(400).send({ error: "Property is required" });
-  }
-
-  const timeStatement = getTimeStatement(req.query);
+export function buildEventPropertyMetricQueries(query: GetEventPropertyMetricRequest["Querystring"], site: number) {
+  const {
+    event_name: eventName,
+    event_name_like: eventNameLike,
+    filters,
+    limit,
+    page,
+    property_value: propertyValue,
+  } = query;
+  const property = typeof query.property === "string" ? query.property.trim() : "";
+  const timeStatement = getTimeStatement(query);
   const filterStatement = filters ? getFilterStatement(filters, site, timeStatement) : "";
   const eventNameStatement = getEventNameStatement(eventName, eventNameLike);
   const propertyValueStatement = getPropertyValueStatement(propertyValue);
@@ -219,24 +216,35 @@ export async function getEventPropertyMetric(
     WHERE propertyValue != ''
   `;
 
-  const queryParams = {
+  const queryParams: Record<string, string | number> = {
     siteId: site,
     property,
-    eventName,
-    eventNameLike,
-    propertyValue,
   };
+  if (eventName) queryParams.eventName = eventName;
+  if (eventNameLike) queryParams.eventNameLike = eventNameLike;
+  if (propertyValue) queryParams.propertyValue = propertyValue;
 
-  try {
-    const [dataResult, countResult, summaryResult] = await Promise.all([
-      clickhouse.query({ query: dataQuery, format: "JSONEachRow", query_params: queryParams }),
-      clickhouse.query({ query: countQuery, format: "JSONEachRow", query_params: queryParams }),
-      clickhouse.query({ query: summaryQuery, format: "JSONEachRow", query_params: queryParams }),
+  return { dataQuery, countQuery, summaryQuery, queryParams };
+}
+
+export const getEventPropertyMetric = analyticsRoute<GetEventPropertyMetricRequest>(
+  "event property metric",
+  async (req: FastifyRequest<GetEventPropertyMetricRequest>, res: FastifyReply) => {
+    const property = typeof req.query.property === "string" ? req.query.property.trim() : "";
+
+    if (!property) {
+      return res.status(400).send({ error: "Property is required" });
+    }
+
+    const { dataQuery, countQuery, summaryQuery, queryParams } = buildEventPropertyMetricQueries(
+      req.query,
+      Number(req.params.siteId)
+    );
+    const [rawData, rawCount, rawSummary] = await Promise.all([
+      runAnalyticsQuery<RawMetricRow>({ query: dataQuery, params: queryParams }),
+      runAnalyticsQuery<{ totalCount: unknown }>({ query: countQuery, params: queryParams }),
+      runAnalyticsQuery<RawNumericSummary>({ query: summaryQuery, params: queryParams }),
     ]);
-
-    const rawData = (await dataResult.json()) as RawMetricRow[];
-    const rawCount = (await countResult.json()) as { totalCount: unknown }[];
-    const rawSummary = (await summaryResult.json()) as RawNumericSummary[];
     const numericSummary = mapNumericSummary(rawSummary[0]);
 
     return res.send({
@@ -246,9 +254,5 @@ export async function getEventPropertyMetric(
         numericSummary: numericSummary.numericCount > 0 ? numericSummary : null,
       },
     });
-  } catch (error) {
-    console.error("Generated Query:", dataQuery);
-    console.error("Error fetching event property metric:", error);
-    return res.status(500).send({ error: "Failed to fetch event property metric" });
   }
-}
+);

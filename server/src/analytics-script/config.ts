@@ -1,6 +1,109 @@
 import { ScriptConfig } from "./types.js";
 import { parseJsonSafely } from "./utils.js";
 
+const FEATURE_FLAG_REQUEST_TIMEOUT_MS = 2000;
+
+type FeatureFlagFetchResult = {
+  enabled: boolean;
+  flags: ScriptConfig["featureFlags"];
+};
+
+function getBooleanAttribute(scriptTag: HTMLScriptElement, name: string, defaultValue: boolean): boolean {
+  const value = scriptTag.getAttribute(name);
+  return value === null ? defaultValue : value !== "false";
+}
+
+function createVisitorId(): string {
+  try {
+    if (crypto?.randomUUID) {
+      return crypto.randomUUID();
+    }
+  } catch (e) {
+    // crypto may be unavailable in older browsers
+  }
+
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+}
+
+function getOrCreateVisitorId(namespace: string): string {
+  const key = `${namespace}-visitor-id`;
+
+  try {
+    const stored = localStorage.getItem(key);
+    if (stored) return stored;
+
+    const visitorId = createVisitorId();
+    localStorage.setItem(key, visitorId);
+    return visitorId;
+  } catch (e) {
+    return createVisitorId();
+  }
+}
+
+function getIdentifiedUserId(namespace: string): string | undefined {
+  try {
+    return localStorage.getItem(`${namespace}-user-id`) || undefined;
+  } catch (e) {
+    return undefined;
+  }
+}
+
+function getEvaluationPathname(url: URL): string {
+  if (url.hash && url.hash.startsWith("#/")) {
+    return url.hash.substring(1);
+  }
+
+  return url.pathname;
+}
+
+async function fetchFeatureFlags(
+  analyticsHost: string,
+  siteId: string,
+  namespace: string,
+  visitorId: string
+): Promise<FeatureFlagFetchResult> {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), FEATURE_FLAG_REQUEST_TIMEOUT_MS);
+
+  try {
+    const url = new URL(window.location.href);
+    const response = await fetch(`${analyticsHost}/site/${siteId}/feature-flags/evaluate`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      credentials: "omit",
+      signal: controller.signal,
+      body: JSON.stringify({
+        anonymousId: visitorId,
+        identifiedUserId: getIdentifiedUserId(namespace),
+        hostname: url.hostname,
+        pathname: getEvaluationPathname(url),
+        querystring: url.search,
+        query: Object.fromEntries(url.searchParams.entries()),
+        referrer: document.referrer,
+        language: navigator.language,
+        screenWidth: screen.width,
+        screenHeight: screen.height,
+      }),
+    });
+
+    if (!response.ok) {
+      return { enabled: true, flags: {} };
+    }
+
+    const data = await response.json();
+    return {
+      enabled: data?.featureFlagsEnabled !== false,
+      flags: data?.flags && typeof data.flags === "object" ? data.flags : {},
+    };
+  } catch (e) {
+    return { enabled: true, flags: {} };
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
+
 /**
  * Parse minimal script configuration from the script tag attributes
  * Configuration is intentionally self-contained so the tracking script does
@@ -26,11 +129,7 @@ export async function parseScriptConfig(scriptTag: HTMLScriptElement): Promise<S
   }
 
   const namespace = scriptTag.getAttribute("data-namespace") || "rybbit";
-
-  const parseBooleanAttribute = (name: string, defaultValue: boolean) => {
-    const value = scriptTag.getAttribute(name);
-    return value === null ? defaultValue : value !== "false";
-  };
+  const visitorId = getOrCreateVisitorId(namespace);
 
   // These can be overridden via data attributes for testing/debugging
   const skipPatterns = parseJsonSafely<string[]>(scriptTag.getAttribute("data-skip-patterns"), []);
@@ -83,27 +182,30 @@ export async function parseScriptConfig(scriptTag: HTMLScriptElement): Promise<S
 
   const tag = scriptTag.getAttribute("data-tag") || "";
 
-  return {
+  const resolvedConfig: ScriptConfig = {
     namespace,
     analyticsHost,
     siteId,
+    visitorId,
     debounceDuration,
     sessionReplayBatchSize,
     sessionReplayBatchInterval,
     sessionReplayMaskTextSelectors,
     skipPatterns,
     maskPatterns,
-    autoTrackPageview: parseBooleanAttribute("data-track-initial-pageview", true),
-    autoTrackSpa: parseBooleanAttribute("data-track-spa-navigation", true),
-    trackQuerystring: parseBooleanAttribute("data-track-url-params", true),
-    trackOutbound: parseBooleanAttribute("data-track-outbound", true),
-    enableWebVitals: parseBooleanAttribute("data-web-vitals", false),
-    trackErrors: parseBooleanAttribute("data-track-errors", false),
-    enableSessionReplay: parseBooleanAttribute("data-session-replay", false),
-    trackButtonClicks: parseBooleanAttribute("data-track-button-clicks", false),
-    trackCopy: parseBooleanAttribute("data-track-copy", false),
-    trackFormInteractions: parseBooleanAttribute("data-track-form-interactions", false),
+    autoTrackPageview: getBooleanAttribute(scriptTag, "data-track-initial-pageview", true),
+    autoTrackSpa: getBooleanAttribute(scriptTag, "data-track-spa-navigation", true),
+    trackQuerystring: getBooleanAttribute(scriptTag, "data-track-url-params", true),
+    trackOutbound: getBooleanAttribute(scriptTag, "data-track-outbound", true),
+    enableWebVitals: getBooleanAttribute(scriptTag, "data-web-vitals", false),
+    trackErrors: getBooleanAttribute(scriptTag, "data-track-errors", false),
+    enableSessionReplay: getBooleanAttribute(scriptTag, "data-session-replay", false),
+    trackButtonClicks: getBooleanAttribute(scriptTag, "data-track-button-clicks", false),
+    trackCopy: getBooleanAttribute(scriptTag, "data-track-copy", false),
+    trackFormInteractions: getBooleanAttribute(scriptTag, "data-track-form-interactions", false),
     tag,
+    featureFlagsEnabled: getBooleanAttribute(scriptTag, "data-feature-flags-enabled", false),
+    featureFlags: {},
     // rrweb session replay options (undefined means use rrweb defaults)
     sessionReplayBlockClass,
     sessionReplayBlockSelector,
@@ -117,4 +219,11 @@ export async function parseScriptConfig(scriptTag: HTMLScriptElement): Promise<S
     sessionReplaySlimDOMOptions,
     sessionReplaySampleRate,
   };
+
+  if (resolvedConfig.featureFlagsEnabled) {
+    const result = await fetchFeatureFlags(analyticsHost, siteId, namespace, visitorId);
+    resolvedConfig.featureFlagsEnabled = result.enabled;
+    resolvedConfig.featureFlags = result.flags;
+  }
+  return resolvedConfig;
 }

@@ -1,14 +1,19 @@
 import { DateTime } from "luxon";
 import { clickhouse } from "../../db/clickhouse/clickhouse.js";
+import { lookupAsn } from "../../db/geolocation/asn.js";
 import { getLocation } from "../../db/geolocation/geolocation.js";
 import { createServiceLogger } from "../../lib/logger/logger.js";
 import { getDeviceType } from "../../utils.js";
+import { isDatacenterAsn } from "./botBlocking/datacenterAsns.js";
 import { getChannel } from "./getChannel.js";
 import { clearSelfReferrer, getAllUrlParams, TotalTrackingPayload } from "./utils.js";
 
 type TotalPayload = TotalTrackingPayload & {
   sessionId: string;
 };
+
+const PAGEVIEW_BATCH_SIZE = 5000;
+const PAGEVIEW_FLUSH_INTERVAL_MS = 1000;
 
 const getParsedProperties = (properties: string | undefined) => {
   try {
@@ -20,8 +25,8 @@ const getParsedProperties = (properties: string | undefined) => {
 
 class PageviewQueue {
   private queue: TotalPayload[] = [];
-  private batchSize = 5000;
-  private interval = 1000;
+  private batchSize = PAGEVIEW_BATCH_SIZE;
+  private interval = PAGEVIEW_FLUSH_INTERVAL_MS;
   private processing = false;
   private logger = createServiceLogger("pageview-queue");
 
@@ -60,6 +65,12 @@ class PageviewQueue {
       const city = dataForIp?.city || "";
       const timezone = dataForIp?.timeZone || "";
 
+      // Same MaxMind lookup already used to decide identity bucketing
+      // (bucketIpForIdentity) and bot-detection eligibility; stored here purely
+      // for debugging identity-splitting reports, treated like geo data
+      // (independent of storeIp) since it identifies a network, not a device.
+      const asnInfo = lookupAsn(pv.ipAddress);
+
       // Check if referrer is from the same domain and clear it if so
       let referrer = clearSelfReferrer(pv.referrer || "", pv.hostname || "");
 
@@ -96,31 +107,22 @@ class PageviewQueue {
         event_name: pv.event_name || "",
         props: getParsedProperties(pv.properties),
         url_parameters: allUrlParams,
-        // Performance metrics (only included for performance events)
-        lcp: pv.lcp || null,
-        cls: pv.cls || null,
-        inp: pv.inp || null,
-        fcp: pv.fcp || null,
-        ttfb: pv.ttfb || null,
+        // Performance metrics (only included for performance events).
+        // ?? not ||: 0 is a legitimate measurement (a perfect CLS score is 0)
+        // and must not be coerced to NULL, which would skew percentiles.
+        lcp: pv.lcp ?? null,
+        cls: pv.cls ?? null,
+        inp: pv.inp ?? null,
+        fcp: pv.fcp ?? null,
+        ttfb: pv.ttfb ?? null,
         ip: pv.storeIp ? pv.ipAddress : null,
         timezone: timezone,
         tag: pv.tag || "",
+        feature_flags: pv.feature_flags || {},
         import_id: null,
-        company: dataForIp?.company?.name || "",
-        company_domain: dataForIp?.company?.domain || "",
-        company_type: dataForIp?.company?.type || "",
-        company_abuse_score: dataForIp?.company?.abuseScore ?? null,
-        asn: dataForIp?.asn?.asn || null,
-        asn_org: dataForIp?.asn?.org || "",
-        asn_domain: dataForIp?.asn?.domain || "",
-        asn_type: dataForIp?.asn?.type || "",
-        asn_abuse_score: dataForIp?.asn?.abuseScore ?? null,
-        vpn: dataForIp?.vpn || "",
-        crawler: dataForIp?.crawler || "",
-        datacenter: dataForIp?.datacenter || "",
-        is_proxy: dataForIp?.isProxy ?? null,
-        is_tor: dataForIp?.isTor ?? null,
-        is_satellite: dataForIp?.isSatellite ?? null,
+        asn: asnInfo?.asn ?? null,
+        asn_org: asnInfo?.organization || "",
+        is_datacenter_asn: asnInfo && isDatacenterAsn(asnInfo.asn) ? 1 : 0,
       };
     });
 
@@ -133,7 +135,7 @@ class PageviewQueue {
         format: "JSONEachRow",
       });
     } catch (error) {
-      this.logger.error(error, "Error processing pageview queue");
+      this.logger.error({ err: error }, "Error processing pageview queue");
     } finally {
       this.processing = false;
     }
