@@ -75,6 +75,7 @@ async function recordEvent(trackingRequest: TrackingRequest): Promise<IngestOutc
   // first can lose the very parameter an exclusion names.
   const exclusionDecision = await decideSiteExclusion(site, {
     ipAddress: trackingRequest.ipAddress,
+    countryOverride: trackingRequest.geoOverride?.country?.toUpperCase(),
     candidateIps: trackingRequest.candidateIps,
     pathname: trackingRequest.payload.pathname,
     querystring: trackingRequest.payload.querystring,

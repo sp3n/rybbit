@@ -97,3 +97,13 @@ describe("the event time and id on an ingested payload", () => {
     expect(pageview({ event_id: "a".repeat(129) }).success).toBe(false);
   });
 });
+
+describe("the geography on an ingested payload", () => {
+  it("accepts a partial geography object", () => {
+    expect(pageview({ geo: { country: "GB", timezone: "Europe/London" } }).success).toBe(true);
+  });
+
+  it("rejects unknown geography keys", () => {
+    expect(pageview({ geo: { country: "GB", asn: 13335 } }).success).toBe(false);
+  });
+});

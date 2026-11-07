@@ -5,6 +5,7 @@ import { hasScope } from "../../lib/scopes.js";
 import { siteConfig, type SiteConfigData } from "../../lib/siteConfig.js";
 import { getRequestUserAgent } from "../../utils.js";
 import { EventTimeError, resolveEventTime } from "./eventTime.js";
+import type { GeoOverride } from "./geoOverride.js";
 import { collectCandidateClientIps, resolveClientIp } from "./resolveClientIp.js";
 import type { ValidatedTrackingPayload } from "./trackingPayload.js";
 
@@ -60,6 +61,8 @@ export interface TrackingRequest {
   eventTimeSupplied: boolean;
   /** sp3n/rybbit fork: a trusted caller's idempotency key for this event; undefined otherwise. */
   eventId?: string;
+  /** sp3n/rybbit fork: a trusted caller's geography for this event; undefined otherwise. */
+  geoOverride?: GeoOverride;
 }
 
 /**
@@ -125,5 +128,6 @@ export async function resolveTrackingRequest(
     receivedAt: eventTime.eventTime,
     eventTimeSupplied: eventTime.supplied,
     eventId: trustedServerSideIngestion ? payload.event_id : undefined,
+    geoOverride: trustedServerSideIngestion ? payload.geo : undefined,
   };
 }

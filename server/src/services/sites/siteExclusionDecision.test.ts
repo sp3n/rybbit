@@ -181,6 +181,14 @@ describe("decideSiteExclusion", () => {
     expect(mocks.getLocation).toHaveBeenCalledWith(["198.51.100.10"]);
   });
 
+  // sp3n/rybbit fork: the country a trusted caller supplies is the one stored.
+  it("excludes by a trusted country override without an IP lookup", async () => {
+    await expect(
+      decideSiteExclusion(configuration({ excludedCountries: ["GB"] }), { ...request, countryOverride: "GB" })
+    ).resolves.toMatchObject({ excluded: true, reason: "country", value: "GB" });
+    expect(mocks.getLocation).not.toHaveBeenCalled();
+  });
+
   it("matches path globs case-insensitively", async () => {
     const rules = configuration({ excludedPaths: ["/admin/*", "/preview"] });
 
@@ -294,9 +302,9 @@ describe("decideSiteExclusion", () => {
       })
     ).resolves.toEqual({ excluded: false });
 
-    await expect(
-      decideSiteExclusion(configuration({ excludedQueryParams: ["preview"] }), withQuery)
-    ).resolves.toEqual({ excluded: false });
+    await expect(decideSiteExclusion(configuration({ excludedQueryParams: ["preview"] }), withQuery)).resolves.toEqual({
+      excluded: false,
+    });
   });
 
   it("returns the first exclusion in the fixed ordering and short-circuits later work", async () => {

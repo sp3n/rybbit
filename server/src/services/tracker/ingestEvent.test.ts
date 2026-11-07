@@ -414,3 +414,30 @@ describe("ingestEvent event time and dedupe", () => {
     expect(mocks.releaseClaim).not.toHaveBeenCalled();
   });
 });
+
+// sp3n/rybbit fork: the stored country decides country exclusions too.
+describe("ingestEvent geography override", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.decideSiteExclusion.mockResolvedValue({ excluded: false });
+    mocks.isSiteOverLimit.mockReturnValue(false);
+    mocks.isSiteWithoutPlan.mockReturnValue(false);
+    mocks.checkBotBlocking.mockResolvedValue(null);
+    mocks.updateSession.mockResolvedValue({ sessionId: "session-alice" });
+    mocks.generateUserId.mockResolvedValue("shared-fingerprint");
+    mocks.addPageview.mockResolvedValue(undefined);
+    mocks.claimEvent.mockResolvedValue({ duplicate: false, release: mocks.releaseClaim });
+  });
+
+  it("passes a trusted country to exclusions and the geography to the queue", async () => {
+    const geo = { country: "gb", city: "London" };
+
+    await ingestEvent(trackingRequest({ trustedServerSideIngestion: true, geoOverride: geo }));
+
+    expect(mocks.decideSiteExclusion).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ countryOverride: "GB" })
+    );
+    expect(mocks.addPageview).toHaveBeenCalledWith(expect.objectContaining({ geoOverride: geo }));
+  });
+});

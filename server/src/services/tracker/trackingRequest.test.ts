@@ -219,3 +219,47 @@ describe("resolveTrackingRequest event time and id", () => {
     expect(resolved!.eventTimeSupplied).toBe(false);
   });
 });
+
+// sp3n/rybbit fork: a trusted bridge's geography (geoOverride.ts).
+describe("resolveTrackingRequest geography override", () => {
+  const geo = {
+    country: "GB",
+    region: "ENG",
+    city: "London",
+    latitude: 51.51,
+    longitude: -0.13,
+    timezone: "Europe/London",
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.getConfig.mockResolvedValue(site);
+    mocks.lookupAsn.mockReturnValue(null);
+  });
+
+  it("keeps a trusted caller's geography alongside its forwarded IP", async () => {
+    mocks.checkApiKey.mockResolvedValue({ valid: true, statements: { ingest: ["write"] } });
+
+    const resolved = await resolveTrackingRequest(
+      request({ authorization: "Bearer sk_test" }),
+      payload({ ip_address: "203.0.113.10", geo })
+    );
+
+    expect(resolved!.geoOverride).toEqual(geo);
+    expect(resolved!.ipAddress).toBe("203.0.113.10");
+  });
+
+  it("ignores an untrusted caller's geography", async () => {
+    const resolved = await resolveTrackingRequest(request({}), payload({ geo }));
+
+    expect(resolved!.geoOverride).toBeUndefined();
+  });
+
+  it("ignores the geography of a bearer without ingest:write", async () => {
+    mocks.checkApiKey.mockResolvedValue({ valid: true, statements: { site: ["read"] } });
+
+    const resolved = await resolveTrackingRequest(request({ authorization: "Bearer sk_test" }), payload({ geo }));
+
+    expect(resolved!.geoOverride).toBeUndefined();
+  });
+});

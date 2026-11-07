@@ -6,6 +6,7 @@ import { createServiceLogger } from "../../lib/logger/logger.js";
 import { getDeviceType } from "../../utils.js";
 import { isDatacenterAsn } from "./botBlocking/datacenterAsns.js";
 import { getChannel } from "./getChannel.js";
+import { resolveLocation } from "./geoOverride.js";
 import {
   clearSelfReferrer,
   EVENTS_INSERT_SETTINGS,
@@ -71,14 +72,16 @@ class PageviewQueue {
           return true;
         })
         .map(pv => {
-          const dataForIp = geoData?.[pv.ipAddress];
+          // sp3n/rybbit fork: a trusted caller's geography wins over the IP
+          // lookup, field by field (geoOverride.ts).
+          const location = resolveLocation(pv.geoOverride, geoData?.[pv.ipAddress]);
 
-          const countryCode = dataForIp?.countryIso || "";
-          const regionCode = dataForIp?.region || "";
-          const latitude = dataForIp?.latitude || 0;
-          const longitude = dataForIp?.longitude || 0;
-          const city = dataForIp?.city || "";
-          const timezone = dataForIp?.timeZone || "";
+          const countryCode = location.countryIso;
+          const regionCode = location.region;
+          const latitude = location.latitude;
+          const longitude = location.longitude;
+          const city = location.city;
+          const timezone = location.timeZone;
 
           // Same MaxMind lookup already used to decide identity bucketing
           // (bucketIpForIdentity) and bot-detection eligibility; stored here purely

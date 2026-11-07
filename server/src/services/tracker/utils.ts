@@ -2,6 +2,7 @@ import UAParser, { UAParser as userAgentParser } from "ua-parser-js";
 import { userIdService } from "../userId/userIdService.js";
 import type { TrackingRequest } from "./trackingRequest.js";
 import { TrackingPayload } from "./types.js";
+import type { GeoOverride } from "./geoOverride.js";
 
 export type TotalTrackingPayload = TrackingPayload & {
   userId: string; // Always the device fingerprint
@@ -23,6 +24,8 @@ export type TotalTrackingPayload = TrackingPayload & {
   tag?: string;
   feature_flags?: Record<string, string>;
   visitor_id?: string;
+  /** sp3n/rybbit fork: a trusted caller's geography; wins over the IP lookup per field. */
+  geoOverride?: GeoOverride;
 };
 
 // ua-parser-js is regex-heavy and runs on every event. User-agent strings repeat
@@ -125,6 +128,7 @@ export async function createBasePayload(trackingRequest: TrackingRequest): Promi
     user_agent: _userAgentOverride,
     timestamp: _timestampOverride,
     event_id: _eventId,
+    geo: _geo,
     ...payloadBody
   } = payload;
 
@@ -162,6 +166,7 @@ export async function createBasePayload(trackingRequest: TrackingRequest): Promi
     userId: anonymousId, // Always the device fingerprint
     identifiedUserId: identifiedUserId, // Custom user ID when identified
     storeIp: site.trackIp,
+    geoOverride: trackingRequest.geoOverride,
   } as any;
 }
 

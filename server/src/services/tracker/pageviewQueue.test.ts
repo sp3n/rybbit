@@ -152,6 +152,62 @@ describe("pageviewQueue", () => {
     }
   );
 
+  // sp3n/rybbit fork: a trusted caller's geography (geoOverride.ts).
+  it("stores a trusted geography override instead of the IP lookup", async () => {
+    mocks.getLocation.mockResolvedValue({
+      "203.0.113.10": {
+        countryIso: "GB",
+        region: "SCT",
+        city: "Edinburgh",
+        latitude: 55.95,
+        longitude: -3.19,
+        timeZone: "Europe/London",
+      },
+    });
+
+    await pageviewQueue.add(
+      makePayload({
+        geoOverride: {
+          country: "GB",
+          region: "ENG",
+          city: "London",
+          latitude: 51.51,
+          longitude: -0.13,
+          timezone: "Europe/London",
+        },
+      })
+    );
+    await vi.advanceTimersByTimeAsync(1000);
+
+    const row = mocks.insert.mock.calls[0][0].values[0];
+    expect(row).toMatchObject({
+      country: "GB",
+      region: "GB-ENG",
+      city: "London",
+      lat: 51.51,
+      lon: -0.13,
+      timezone: "Europe/London",
+    });
+  });
+
+  it("keeps the IP lookup geography when no override is sent", async () => {
+    mocks.getLocation.mockResolvedValue({
+      "203.0.113.10": {
+        countryIso: "GB",
+        region: "SCT",
+        city: "Edinburgh",
+        latitude: 55.95,
+        longitude: -3.19,
+        timeZone: "Europe/London",
+      },
+    });
+
+    await flush();
+
+    const row = mocks.insert.mock.calls[0][0].values[0];
+    expect(row).toMatchObject({ country: "GB", region: "GB-SCT", city: "Edinburgh", lat: 55.95, lon: -3.19 });
+  });
+
   it("inserts with settings that keep one bad row from failing the batch", async () => {
     await flush();
 

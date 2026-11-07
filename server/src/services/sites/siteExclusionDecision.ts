@@ -18,6 +18,8 @@ type SiteExclusionConfiguration = Pick<
 
 export type SiteExclusionRequest = {
   ipAddress: string;
+  /** sp3n/rybbit fork: a trusted caller's ISO country, used instead of the IP lookup. */
+  countryOverride?: string;
   /**
    * Every plausible client IP for the request (edge, forwarded hops, socket).
    * IP exclusions match against ALL of them, not just the resolved `ipAddress`:
@@ -245,8 +247,10 @@ export async function decideSiteExclusion(
   }
 
   if (configuration.excludedCountries.length > 0) {
-    const locations = await getLocation([request.ipAddress]);
-    const countryIso = locations[request.ipAddress]?.countryIso;
+    // sp3n/rybbit fork: a trusted caller's country is the one stored, so it is
+    // the one excluded too.
+    const countryIso =
+      request.countryOverride || (await getLocation([request.ipAddress]))[request.ipAddress]?.countryIso;
 
     if (
       countryIso &&

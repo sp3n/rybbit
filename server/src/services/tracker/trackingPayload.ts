@@ -1,5 +1,6 @@
 import { ALL_CLIENT_BOT_SIGNAL_BITS, MAX_CLIENT_BOT_SCORE } from "@rybbit/shared";
 import { z } from "zod";
+import { geoOverrideSchema } from "./geoOverride.js";
 
 /**
  * Cut a string to `maxLength` UTF-16 units without splitting a surrogate pair:
@@ -51,6 +52,7 @@ const baseEventFields = {
     .max(128)
     .regex(/^[A-Za-z0-9._:-]+$/, "event_id may contain only letters, digits, '.', '_', ':' and '-'")
     .optional(),
+  geo: geoOverrideSchema.optional(),
   // Bounds come from the Bot Signal contract, so appending a signal bit widens
   // the accepted mask with it. Hard-coding the bound is how the 12th bit
   // (squareScreen = 2048) came to fail validation and drop the whole event.
