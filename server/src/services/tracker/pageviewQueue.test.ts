@@ -238,7 +238,11 @@ describe("pageviewQueue", () => {
   });
 
   it("stores the good rows and refuses only the row ClickHouse rejects", async () => {
-    const refused = new ClickHouseError({ message: "Cannot parse input", code: "27", type: "CANNOT_PARSE_INPUT" });
+    const refused = new ClickHouseError({
+      message: "Cannot parse input",
+      code: "27",
+      type: "CANNOT_PARSE_INPUT_ASSERTION_FAILED",
+    });
     mocks.insert
       .mockRejectedValueOnce(refused) // the strict insert of both rows
       .mockResolvedValueOnce(undefined) // the good row alone
@@ -291,6 +295,31 @@ describe("pageviewQueue", () => {
 
     expect(await outcome).toBeInstanceOf(RetryableIngestError);
     expect(mocks.insert).not.toHaveBeenCalled();
+  });
+
+  it("keeps a schema error retriable rather than refusing healthy events for good", async () => {
+    mocks.insert.mockRejectedValueOnce(
+      new ClickHouseError({ message: "Missing columns", code: "47", type: "UNKNOWN_IDENTIFIER" })
+    );
+
+    const outcome = pageviewQueue.addDurable(makePayload()).then(
+      () => "stored",
+      error => error
+    );
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(await outcome).toBeInstanceOf(RetryableIngestError);
+  });
+
+  it("inserts durable rows in single-block chunks, each with an absolute abort deadline", async () => {
+    const all = Array.from({ length: 150 }, (_, i) => pageviewQueue.addDurable(makePayload({ pathname: `/p${i}` })));
+    await vi.advanceTimersByTimeAsync(1000);
+    await Promise.all(all);
+
+    expect(mocks.insert.mock.calls.map(call => call[0].values.length)).toEqual([100, 50]);
+    const params = mocks.insert.mock.calls[0][0];
+    expect(params.abort_signal).toBeInstanceOf(AbortSignal);
+    expect(params.clickhouse_settings.input_format_parallel_parsing).toBe(0);
   });
 
   it("inserts durable rows without the tolerance for skipped rows", async () => {

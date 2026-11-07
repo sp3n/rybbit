@@ -1,4 +1,4 @@
-import { ClickHouseError } from "@clickhouse/client";
+import { ClickHouseError, type ClickHouseSettings } from "@clickhouse/client";
 import { clickhouse } from "../../db/clickhouse/clickhouse.js";
 import { toClickHouseDateTime } from "../../db/clickhouse/dateTime.js";
 import { lookupAsn } from "../../db/geolocation/asn.js";
@@ -22,23 +22,74 @@ type TotalPayload = TotalTrackingPayload & {
 };
 
 // sp3n/rybbit fork: durable rows are inserted without upstream's tolerance
-// for skipped rows, so a row ClickHouse refuses is never reported as stored.
-const { input_format_allow_errors_num: _allowErrors, ...STRICT_INSERT_SETTINGS } = EVENTS_INSERT_SETTINGS;
+// for skipped rows, so a row ClickHouse refuses is never reported as stored,
+// and as one block (no parallel parsing, a block limit far above a chunk), so
+// an insert that fails stored none of its rows: ClickHouse makes an insert
+// atomic only for a single block in a single partition.
+const { input_format_allow_errors_num: _allowErrors, ...TOLERANT_FREE_SETTINGS } = EVENTS_INSERT_SETTINGS;
+const STRICT_INSERT_SETTINGS: ClickHouseSettings = {
+  ...TOLERANT_FREE_SETTINGS,
+  input_format_parallel_parsing: 0,
+  max_insert_block_size: "1048576",
+  min_insert_block_size_rows: "0",
+  min_insert_block_size_bytes: "0",
+};
+// Rows and JSON bytes per durable insert: far below one block.
+const DURABLE_CHUNK_ROWS = 100;
+const DURABLE_CHUNK_BYTES = 1024 * 1024;
 
 // sp3n/rybbit fork: bounds that keep every durable write inside the claim's
 // lease (eventDedupe.ts, 20 minutes): a waiter older than this is refused
 // rather than inserted; the per-row fallback starts no insert after its
-// deadline; and each insert is bounded by the client's 300-second timeout.
+// deadline; and every durable insert is aborted DURABLE_ABORT_MS after its
+// oldest event was queued, however the connection behaves.
 const DURABLE_MAX_AGE_MS = 3 * 60 * 1000;
 const DURABLE_FALLBACK_BUDGET_MS = 2 * 60 * 1000;
+const DURABLE_ABORT_MS = 10 * 60 * 1000;
 
-// ClickHouse errors that mean "this data is wrong", as opposed to the server
-// being busy, slow or unavailable. Only these make a row permanently refused.
-const DATA_ERROR_TYPE =
-  /^(CANNOT_PARSE|CANNOT_READ|CANNOT_CONVERT|TYPE_MISMATCH|INCORRECT_DATA|TOO_LARGE_STRING_SIZE|CANNOT_INSERT_NULL|ILLEGAL_TYPE|VALUE_IS_OUT_OF_RANGE|ARGUMENT_OUT_OF_BOUND|INCORRECT_NUMBER_OF_COLUMNS|UNKNOWN_IDENTIFIER)/;
+// ClickHouse errors that can only mean "this row's data is wrong". Anything
+// else (schema, I/O, overload, timeouts) stays retriable: refusing a healthy
+// event for good is worse than retrying a bad one until it is dead-lettered.
+const DATA_ERROR_TYPES = new Set([
+  "CANNOT_PARSE_TEXT",
+  "CANNOT_PARSE_QUOTED_STRING",
+  "CANNOT_PARSE_ESCAPE_SEQUENCE",
+  "CANNOT_PARSE_INPUT_ASSERTION_FAILED",
+  "CANNOT_PARSE_NUMBER",
+  "CANNOT_PARSE_DATE",
+  "CANNOT_PARSE_DATETIME",
+  "CANNOT_PARSE_BOOL",
+  "CANNOT_PARSE_UUID",
+  "CANNOT_PARSE_IPV4",
+  "CANNOT_PARSE_IPV6",
+  "TYPE_MISMATCH",
+  "INCORRECT_DATA",
+  "TOO_LARGE_STRING_SIZE",
+  "CANNOT_INSERT_NULL_IN_ORDINARY_COLUMN",
+  "VALUE_IS_OUT_OF_RANGE_OF_DATA_TYPE",
+]);
 
 function isDataError(error: unknown): boolean {
-  return error instanceof ClickHouseError && DATA_ERROR_TYPE.test(error.type ?? "");
+  return error instanceof ClickHouseError && DATA_ERROR_TYPES.has(error.type ?? "");
+}
+
+/** Consecutive chunks of at most DURABLE_CHUNK_ROWS rows and DURABLE_CHUNK_BYTES of JSON. */
+function chunk<T extends { row: unknown }>(entries: T[]): T[][] {
+  const chunks: T[][] = [];
+  let current: T[] = [];
+  let bytes = 0;
+  for (const entry of entries) {
+    const size = JSON.stringify(entry.row).length;
+    if (current.length > 0 && (current.length >= DURABLE_CHUNK_ROWS || bytes + size > DURABLE_CHUNK_BYTES)) {
+      chunks.push(current);
+      current = [];
+      bytes = 0;
+    }
+    current.push(entry);
+    bytes += size;
+  }
+  if (current.length > 0) chunks.push(current);
+  return chunks;
 }
 
 /** The `events` partition (toYYYYMM of the UTC timestamp) a payload's row lands in. */
@@ -99,17 +150,35 @@ class PageviewQueue {
     }
   }
 
-  private insertRows(values: unknown[], settings: typeof STRICT_INSERT_SETTINGS | typeof EVENTS_INSERT_SETTINGS) {
-    return clickhouse.insert({ table: "events", values, format: "JSONEachRow", clickhouse_settings: settings });
+  private insertRows(values: unknown[], settings: ClickHouseSettings, abort_signal?: AbortSignal) {
+    return clickhouse.insert({
+      table: "events",
+      values,
+      format: "JSONEachRow",
+      clickhouse_settings: settings,
+      ...(abort_signal ? { abort_signal } : {}),
+    });
+  }
+
+  /** An insert of these entries, aborted DURABLE_ABORT_MS after the oldest of them was queued. */
+  private insertDurableRows(entries: { pageview: TotalPayload; row: unknown }[]) {
+    const oldest = Math.min(...entries.map(entry => this.waiters.get(entry.pageview)?.addedAt ?? Date.now()));
+    const signal = AbortSignal.timeout(Math.max(1, oldest + DURABLE_ABORT_MS - Date.now()));
+    return this.insertRows(
+      entries.map(entry => entry.row),
+      STRICT_INSERT_SETTINGS,
+      signal
+    );
   }
 
   /**
    * sp3n/rybbit fork: store the rows deliveries are waiting on, each settled by
    * its own outcome.
    *
-   * Rows are inserted one `events` partition (month) at a time: ClickHouse
-   * makes an insert atomic only within a partition, so a failed insert has
-   * stored none of its rows and retrying them cannot duplicate any. If
+   * Rows are inserted one `events` partition (month) at a time, in small
+   * single-block chunks: ClickHouse makes an insert atomic only for one block
+   * in one partition, so a failed insert has stored none of its rows and
+   * retrying them cannot duplicate any. If
    * ClickHouse refuses a partition's data, its rows are inserted one by one,
    * so one bad row neither fails the others nor passes as stored. Any other
    * failure (busy, slow, unreachable) is retriable and nothing is retried here.
@@ -134,12 +203,9 @@ class PageviewQueue {
     }
 
     const deadline = Date.now() + DURABLE_FALLBACK_BUDGET_MS;
-    for (const group of partitions.values()) {
+    for (const group of [...partitions.values()].flatMap(chunk)) {
       try {
-        await this.insertRows(
-          group.map(entry => entry.row),
-          STRICT_INSERT_SETTINGS
-        );
+        await this.insertDurableRows(group);
         this.settle(group.map(entry => entry.pageview));
         continue;
       } catch (error) {
@@ -161,7 +227,7 @@ class PageviewQueue {
           continue;
         }
         try {
-          await this.insertRows([entry.row], STRICT_INSERT_SETTINGS);
+          await this.insertDurableRows([entry]);
           this.settle([entry.pageview]);
         } catch (error) {
           this.logger.error({ err: error, siteId: entry.pageview.site_id }, "ClickHouse refused a trusted event");
