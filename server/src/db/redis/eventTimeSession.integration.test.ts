@@ -216,6 +216,22 @@ describe("eventTimeSession Lua script", () => {
     expect(new Set(ids).size).toBe(1);
   });
 
+  it("keeps the span it just used even when every span was used at the same instant", async () => {
+    const sameInstant = 1_900_000_000_000;
+    const at = (iso: string, candidate: string) =>
+      redis.eventTimeSession(RETAIL_ALICE, candidate, Date.parse(iso), GAP_MS, RETENTION_MS, MAX_SPANS, sameInstant);
+    for (let day = 0; day < MAX_SPANS; day += 1) {
+      await at(new Date(Date.parse("2026-11-07T08:00:00Z") - day * 86_400_000).toISOString(), `d${day}`);
+    }
+
+    const replay = [
+      await at("2026-10-01T08:00:00Z", "r1"),
+      await at("2026-10-01T08:10:00Z", "r2"),
+      await at("2026-10-01T08:20:00Z", "r3"),
+    ];
+    expect(replay).toEqual(["r1", "r1", "r1"]);
+  });
+
   it("reads spans stored before last-used times were kept", async () => {
     const legacyId = "legacy-session";
     await redis.set(

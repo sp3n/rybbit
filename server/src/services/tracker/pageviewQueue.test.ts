@@ -1,5 +1,5 @@
 import { ClickHouseError } from "@clickhouse/client";
-import { PermanentIngestError } from "./ingestErrors.js";
+import { PermanentIngestError, RetryableIngestError } from "./ingestErrors.js";
 import { Settings } from "luxon";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type UAParser from "ua-parser-js";
@@ -252,6 +252,45 @@ describe("pageviewQueue", () => {
     const [goodOutcome, badOutcome] = await outcomes;
     expect(goodOutcome.status).toBe("fulfilled");
     expect(badOutcome).toMatchObject({ status: "rejected", reason: expect.any(PermanentIngestError) });
+  });
+
+  it("keeps a busy-server error retriable, without retrying rows one by one", async () => {
+    mocks.insert.mockRejectedValueOnce(
+      new ClickHouseError({ message: "Too many parts", code: "252", type: "TOO_MANY_PARTS" })
+    );
+
+    const first = pageviewQueue.addDurable(makePayload({ pathname: "/a" }));
+    const second = pageviewQueue.addDurable(makePayload({ pathname: "/b" }));
+    const outcomes = Promise.allSettled([first, second]);
+    await vi.advanceTimersByTimeAsync(1000);
+
+    for (const outcome of await outcomes) {
+      expect(outcome).toMatchObject({ status: "rejected", reason: expect.any(RetryableIngestError) });
+    }
+    expect(mocks.insert).toHaveBeenCalledOnce();
+  });
+
+  it("inserts durable rows one partition (month) at a time, so a failed insert stored none of its rows", async () => {
+    const october = pageviewQueue.addDurable(makePayload({ timestamp: "2026-10-31T23:59:59.000Z" }));
+    const november = pageviewQueue.addDurable(makePayload({ timestamp: "2026-11-01T00:00:00.000Z" }));
+    await vi.advanceTimersByTimeAsync(1000);
+    await Promise.all([october, november]);
+
+    expect(mocks.insert).toHaveBeenCalledTimes(2);
+    expect(mocks.insert.mock.calls.map(call => call[0].values.length)).toEqual([1, 1]);
+  });
+
+  it("refuses, without inserting, a durable row that waited past its bound", async () => {
+    const stale = pageviewQueue.addDurable(makePayload());
+    const outcome = stale.then(
+      () => "stored",
+      error => error
+    );
+    vi.setSystemTime(Date.now() + 4 * 60 * 1000);
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(await outcome).toBeInstanceOf(RetryableIngestError);
+    expect(mocks.insert).not.toHaveBeenCalled();
   });
 
   it("inserts durable rows without the tolerance for skipped rows", async () => {

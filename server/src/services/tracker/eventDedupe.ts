@@ -28,9 +28,11 @@ const logger = createServiceLogger("event-dedupe");
  * token-checked release sent straight after it lands after it and removes
  * it, so the retry is not blocked until the pending claim expires.
  */
-// Longer than any wait for ClickHouse (ingestEvent.ts, and the client's
-// 300-second insert timeout), so a live delivery never loses its lease.
-const CLAIM_PENDING_MS = 10 * 60 * 1000;
+// Longer than the longest a durable write can take (pageviewQueue.ts: 3
+// minutes queued, a 300-second partition insert, a 2-minute per-row fallback
+// whose last insert may take 300 seconds), so a live delivery never loses its
+// lease while its row may still be written.
+const CLAIM_PENDING_MS = 20 * 60 * 1000;
 const DONE_RETENTION_MS = MAX_EVENT_AGE_MS;
 
 export type EventClaim =

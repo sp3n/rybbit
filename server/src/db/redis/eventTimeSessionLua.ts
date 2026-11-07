@@ -34,8 +34,9 @@
  * other id keep it; a bridge that delivers each identity in time order never
  * produces this.
  *
- * Past the limit, the span used longest ago (wall-clock) is forgotten, so a
- * replay of an older session is not forgotten the moment it starts.
+ * Past the limit, the span used longest ago (wall-clock) is forgotten, and
+ * the span this event used is always kept, so a replay of an older session is
+ * not forgotten the moment it starts, even when clocks tie or skew.
  *
  * Retention is long (the queue's retention, not the gap) so that a session
  * open when an outage began is still known when the backlog drains. A long
@@ -128,8 +129,11 @@ while merged do
   end
 end
 
--- Most recently used first; forget the least recently used beyond the limit.
+-- The span just used first, whatever the clocks say; then most recently
+-- used; forget the least recently used beyond the limit.
 table.sort(spans, function(a, b)
+  if a == chosen then return b ~= chosen end
+  if b == chosen then return false end
   if a.used ~= b.used then return a.used > b.used end
   return a.last > b.last
 end)

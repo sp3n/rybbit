@@ -34,7 +34,7 @@ describe("claimEvent", () => {
 
     const claim = await claimEvent(1, "env-1");
     expect(claim.duplicate).toBe(false);
-    expect(mocks.claimEventId).toHaveBeenCalledWith("event-id:1:env-1", 10 * 60 * 1000, expect.any(String));
+    expect(mocks.claimEventId).toHaveBeenCalledWith("event-id:1:env-1", 20 * 60 * 1000, expect.any(String));
 
     if (!claim.duplicate) await claim.complete();
     const token = mocks.claimEventId.mock.calls[0][2];

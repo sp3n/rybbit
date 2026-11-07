@@ -25,6 +25,27 @@ type TotalPayload = TotalTrackingPayload & {
 // for skipped rows, so a row ClickHouse refuses is never reported as stored.
 const { input_format_allow_errors_num: _allowErrors, ...STRICT_INSERT_SETTINGS } = EVENTS_INSERT_SETTINGS;
 
+// sp3n/rybbit fork: bounds that keep every durable write inside the claim's
+// lease (eventDedupe.ts, 20 minutes): a waiter older than this is refused
+// rather than inserted; the per-row fallback starts no insert after its
+// deadline; and each insert is bounded by the client's 300-second timeout.
+const DURABLE_MAX_AGE_MS = 3 * 60 * 1000;
+const DURABLE_FALLBACK_BUDGET_MS = 2 * 60 * 1000;
+
+// ClickHouse errors that mean "this data is wrong", as opposed to the server
+// being busy, slow or unavailable. Only these make a row permanently refused.
+const DATA_ERROR_TYPE =
+  /^(CANNOT_PARSE|CANNOT_READ|CANNOT_CONVERT|TYPE_MISMATCH|INCORRECT_DATA|TOO_LARGE_STRING_SIZE|CANNOT_INSERT_NULL|ILLEGAL_TYPE|VALUE_IS_OUT_OF_RANGE|ARGUMENT_OUT_OF_BOUND|INCORRECT_NUMBER_OF_COLUMNS|UNKNOWN_IDENTIFIER)/;
+
+function isDataError(error: unknown): boolean {
+  return error instanceof ClickHouseError && DATA_ERROR_TYPE.test(error.type ?? "");
+}
+
+/** The `events` partition (toYYYYMM of the UTC timestamp) a payload's row lands in. */
+function partitionOf(pageview: TotalPayload): string {
+  return pageview.timestamp.slice(0, 7);
+}
+
 const PAGEVIEW_BATCH_SIZE = 5000;
 const PAGEVIEW_FLUSH_INTERVAL_MS = 1000;
 
@@ -35,7 +56,10 @@ class PageviewQueue {
   private processing = false;
   private logger = createServiceLogger("pageview-queue");
   // sp3n/rybbit fork: callers waiting for their event to reach ClickHouse (addDurable).
-  private waiters = new WeakMap<TotalPayload, { resolve: () => void; reject: (error: unknown) => void }>();
+  private waiters = new WeakMap<
+    TotalPayload,
+    { resolve: () => void; reject: (error: unknown) => void; addedAt: number }
+  >();
 
   constructor() {
     // Start processing interval
@@ -60,7 +84,7 @@ class PageviewQueue {
    */
   addDurable(pageview: TotalPayload): Promise<void> {
     return new Promise((resolve, reject) => {
-      this.waiters.set(pageview, { resolve, reject });
+      this.waiters.set(pageview, { resolve, reject, addedAt: Date.now() });
       this.queue.push(pageview);
     });
   }
@@ -81,42 +105,73 @@ class PageviewQueue {
 
   /**
    * sp3n/rybbit fork: store the rows deliveries are waiting on, each settled by
-   * its own outcome. One strict insert for all of them; if ClickHouse refuses
-   * the data, each row alone, so one bad row neither fails the others nor
-   * passes as stored.
+   * its own outcome.
+   *
+   * Rows are inserted one `events` partition (month) at a time: ClickHouse
+   * makes an insert atomic only within a partition, so a failed insert has
+   * stored none of its rows and retrying them cannot duplicate any. If
+   * ClickHouse refuses a partition's data, its rows are inserted one by one,
+   * so one bad row neither fails the others nor passes as stored. Any other
+   * failure (busy, slow, unreachable) is retriable and nothing is retried here.
    */
   private async insertDurable(entries: { pageview: TotalPayload; row: unknown }[]) {
-    if (entries.length === 0) return;
-    try {
-      await this.insertRows(
-        entries.map(entry => entry.row),
-        STRICT_INSERT_SETTINGS
-      );
-      this.settle(entries.map(entry => entry.pageview));
-      return;
-    } catch (error) {
-      if (!(error instanceof ClickHouseError)) {
-        this.logger.error({ err: error }, "Error storing trusted events");
-        this.settle(
-          entries.map(entry => entry.pageview),
-          new RetryableIngestError("the event could not be stored")
-        );
-        return;
+    const now = Date.now();
+    const fresh: typeof entries = [];
+    for (const entry of entries) {
+      const waiter = this.waiters.get(entry.pageview);
+      if (waiter && now - waiter.addedAt > DURABLE_MAX_AGE_MS) {
+        // Queued so long that inserting now could outlast its claim's lease.
+        this.settle([entry.pageview], new RetryableIngestError("the event waited too long to be stored"));
+      } else {
+        fresh.push(entry);
       }
     }
 
-    for (const entry of entries) {
+    const partitions = new Map<string, typeof entries>();
+    for (const entry of fresh) {
+      const key = partitionOf(entry.pageview);
+      partitions.set(key, [...(partitions.get(key) ?? []), entry]);
+    }
+
+    const deadline = Date.now() + DURABLE_FALLBACK_BUDGET_MS;
+    for (const group of partitions.values()) {
       try {
-        await this.insertRows([entry.row], STRICT_INSERT_SETTINGS);
-        this.settle([entry.pageview]);
-      } catch (error) {
-        this.logger.error({ err: error, siteId: entry.pageview.site_id }, "ClickHouse refused a trusted event");
-        this.settle(
-          [entry.pageview],
-          error instanceof ClickHouseError
-            ? new PermanentIngestError(`ClickHouse refused the event (${error.code})`)
-            : new RetryableIngestError("the event could not be stored")
+        await this.insertRows(
+          group.map(entry => entry.row),
+          STRICT_INSERT_SETTINGS
         );
+        this.settle(group.map(entry => entry.pageview));
+        continue;
+      } catch (error) {
+        if (!isDataError(error) || group.length === 1) {
+          this.logger.error({ err: error }, "Error storing trusted events");
+          this.settle(
+            group.map(entry => entry.pageview),
+            isDataError(error)
+              ? new PermanentIngestError(`ClickHouse refused the event (${(error as ClickHouseError).type})`)
+              : new RetryableIngestError("the event could not be stored")
+          );
+          continue;
+        }
+      }
+
+      for (const entry of group) {
+        if (Date.now() > deadline) {
+          this.settle([entry.pageview], new RetryableIngestError("the event could not be stored in time"));
+          continue;
+        }
+        try {
+          await this.insertRows([entry.row], STRICT_INSERT_SETTINGS);
+          this.settle([entry.pageview]);
+        } catch (error) {
+          this.logger.error({ err: error, siteId: entry.pageview.site_id }, "ClickHouse refused a trusted event");
+          this.settle(
+            [entry.pageview],
+            isDataError(error)
+              ? new PermanentIngestError(`ClickHouse refused the event (${(error as ClickHouseError).type})`)
+              : new RetryableIngestError("the event could not be stored")
+          );
+        }
       }
     }
   }
