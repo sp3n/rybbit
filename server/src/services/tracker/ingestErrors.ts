@@ -38,3 +38,16 @@ export class RateLimitedIngestError extends Error {
 export class PermanentIngestError extends Error {
   readonly statusCode = 422;
 }
+
+/**
+ * Answer 403: a bearer sent fields only an ingest:write key may send
+ * (timestamp, event_id, geo), but its key is invalid, revoked or lacks
+ * ingest:write. Requests without a bearer still have those fields ignored.
+ */
+export class UntrustedBearerError extends Error {
+  readonly statusCode = 403;
+
+  constructor() {
+    super("This key may not send timestamp, event_id or geo: it needs ingest:write on the site");
+  }
+}

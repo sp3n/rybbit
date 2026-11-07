@@ -4,7 +4,12 @@ import { createServiceLogger } from "../../lib/logger/logger.js";
 import { ingestEvent } from "./ingestEvent.js";
 import { trackingPayloadSchema } from "./trackingPayload.js";
 import { EventTimeError } from "./eventTime.js";
-import { PermanentIngestError, RateLimitedIngestError, RetryableIngestError } from "./ingestErrors.js";
+import {
+  PermanentIngestError,
+  RateLimitedIngestError,
+  RetryableIngestError,
+  UntrustedBearerError,
+} from "./ingestErrors.js";
 import { resolveTrackingRequest } from "./trackingRequest.js";
 
 const logger = createServiceLogger("track-event");
@@ -71,6 +76,10 @@ export async function trackEvent(request: FastifyRequest, reply: FastifyReply) {
         .status(error.statusCode)
         .header("retry-after", String(error.retryAfterSeconds))
         .send({ success: false, error: error.message, retryable: true });
+    }
+    if (error instanceof UntrustedBearerError) {
+      logger.warn("A bearer without ingest:write sent trusted fields");
+      return reply.status(403).send({ success: false, error: error.message });
     }
     if (error instanceof PermanentIngestError) {
       logger.warn({ err: error }, "A trusted event cannot be stored");

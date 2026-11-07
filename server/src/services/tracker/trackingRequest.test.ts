@@ -28,7 +28,7 @@ vi.mock("../../db/geolocation/asn.js", async importOriginal => {
 });
 
 import { EventTimeError } from "./eventTime.js";
-import { RateLimitedIngestError } from "./ingestErrors.js";
+import { RateLimitedIngestError, UntrustedBearerError } from "./ingestErrors.js";
 import { resolveTrackingRequest } from "./trackingRequest.js";
 
 const site = {
@@ -191,13 +191,28 @@ describe("resolveTrackingRequest event time and id", () => {
     expect(resolved!.eventId).toBeUndefined();
   });
 
-  it("ignores the timestamp of a bearer without ingest:write", async () => {
+  it("refuses trusted fields from a bearer without ingest:write, rather than degrading it", async () => {
     mocks.checkApiKey.mockResolvedValue({ valid: true, statements: { site: ["read"] } });
 
-    const resolved = await resolveTrackingRequest(bearer(), payload({ timestamp: "2026-11-01T00:00:00.000Z" }));
+    await expect(
+      resolveTrackingRequest(bearer(), payload({ timestamp: "2026-11-01T00:00:00.000Z" }))
+    ).rejects.toBeInstanceOf(UntrustedBearerError);
+  });
 
-    expect(resolved!.receivedAt.toISOString()).toBe("2026-11-07T12:00:00.000Z");
-    expect(resolved!.eventTimeSupplied).toBe(false);
+  it("refuses trusted fields from a revoked key", async () => {
+    mocks.checkApiKey.mockResolvedValue({ valid: false, statements: null });
+
+    await expect(resolveTrackingRequest(bearer(), payload({ event_id: "env-1" }))).rejects.toBeInstanceOf(
+      UntrustedBearerError
+    );
+  });
+
+  it("still degrades a plain event from an under-scoped bearer, as upstream does", async () => {
+    mocks.checkApiKey.mockResolvedValue({ valid: true, statements: { site: ["read"] } });
+
+    const resolved = await resolveTrackingRequest(bearer(), payload());
+
+    expect(resolved!.trustedServerSideIngestion).toBe(false);
   });
 
   it("refuses a trusted timestamp out of bounds", async () => {
@@ -256,12 +271,12 @@ describe("resolveTrackingRequest geography override", () => {
     expect(resolved!.geoOverride).toBeUndefined();
   });
 
-  it("ignores the geography of a bearer without ingest:write", async () => {
+  it("refuses the geography of a bearer without ingest:write", async () => {
     mocks.checkApiKey.mockResolvedValue({ valid: true, statements: { site: ["read"] } });
 
-    const resolved = await resolveTrackingRequest(request({ authorization: "Bearer sk_test" }), payload({ geo }));
-
-    expect(resolved!.geoOverride).toBeUndefined();
+    await expect(
+      resolveTrackingRequest(request({ authorization: "Bearer sk_test" }), payload({ geo }))
+    ).rejects.toBeInstanceOf(UntrustedBearerError);
   });
 });
 

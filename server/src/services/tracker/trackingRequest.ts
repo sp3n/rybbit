@@ -7,7 +7,7 @@ import { siteConfig, type SiteConfigData } from "../../lib/siteConfig.js";
 import { getRequestUserAgent } from "../../utils.js";
 import { EventTimeError, resolveEventTime } from "./eventTime.js";
 import type { GeoOverride } from "./geoOverride.js";
-import { RateLimitedIngestError } from "./ingestErrors.js";
+import { RateLimitedIngestError, UntrustedBearerError } from "./ingestErrors.js";
 import { collectCandidateClientIps, resolveClientIp } from "./resolveClientIp.js";
 import type { ValidatedTrackingPayload } from "./trackingPayload.js";
 
@@ -91,7 +91,14 @@ export async function isTrustedServerSideIngestion(
   if (apiKeyResult.rateLimited && carriesTrustedFields) {
     throw new RateLimitedIngestError(retryAfterSeconds(apiKeyResult.rateLimit));
   }
-  return apiKeyResult.valid && hasScope(apiKeyResult.statements, { resource: "ingest", action: "write" });
+  const trusted = apiKeyResult.valid && hasScope(apiKeyResult.statements, { resource: "ingest", action: "write" });
+  // Likewise a bridge whose key was revoked or lost its scope: degraded, its
+  // 200 would acknowledge an event recorded at the wrong time, without dedupe
+  // and without waiting for storage. It is refused, so it retries and alerts.
+  if (!trusted && carriesTrustedFields) {
+    throw new UntrustedBearerError();
+  }
+  return trusted;
 }
 
 /** sp3n/rybbit fork: how long a rate-limited bridge should wait, from the limiter's own reset times. */
