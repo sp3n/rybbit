@@ -47,7 +47,7 @@ COPY --from=builder /prod/server ./
 
 # Windows checkouts may copy this script with CRLF, which makes Linux resolve
 # the shebang as `/bin/sh\r` and fail with "no such file or directory".
-RUN sed -i 's/\r$//' /docker-entrypoint.sh && chmod +x /docker-entrypoint.sh
+RUN sed -i 's/\r$//' ./docker-entrypoint.sh && chmod +x ./docker-entrypoint.sh
 
 # Expose the API port
 EXPOSE 3001
