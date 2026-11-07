@@ -34,7 +34,7 @@ describe("claimEvent", () => {
 
     const claim = await claimEvent(1, "env-1");
     expect(claim.duplicate).toBe(false);
-    expect(mocks.claimEventId).toHaveBeenCalledWith("event-id:1:env-1", 5 * 60 * 1000);
+    expect(mocks.claimEventId).toHaveBeenCalledWith("event-id:1:env-1", 5 * 60 * 1000, expect.any(String));
 
     if (!claim.duplicate) await claim.complete();
     expect(mocks.completeEventId).toHaveBeenCalledWith("event-id:1:env-1", 15 * 24 * 60 * 60 * 1000);
@@ -58,11 +58,20 @@ describe("claimEvent", () => {
     await expect(claimEvent(1, "env-1")).rejects.toBeInstanceOf(RetryableIngestError);
   });
 
+  it("sends a token-checked release after a timed-out claim, in case the claim lands later", async () => {
+    mocks.claimEventId.mockRejectedValue(new Error("Command timed out"));
+
+    await expect(claimEvent(1, "env-1")).rejects.toBeInstanceOf(RetryableIngestError);
+    const token = mocks.claimEventId.mock.calls[0][2];
+    expect(mocks.releaseEventId).toHaveBeenCalledWith("event-id:1:env-1", token);
+  });
+
   it("releases a claim after a failed ingest", async () => {
     mocks.claimEventId.mockResolvedValue("claimed");
 
     const claim = await claimEvent(1, "env-1");
     if (!claim.duplicate) await claim.release();
-    expect(mocks.releaseEventId).toHaveBeenCalledWith("event-id:1:env-1");
+    const token = mocks.claimEventId.mock.calls[0][2];
+    expect(mocks.releaseEventId).toHaveBeenCalledWith("event-id:1:env-1", token);
   });
 });

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { claimEventId, completeEventId, releaseEventId } from "../../db/redis/redis.js";
 import { createServiceLogger } from "../../lib/logger/logger.js";
 import { MAX_EVENT_AGE_MS } from "./eventTime.js";
@@ -22,6 +23,10 @@ const logger = createServiceLogger("event-dedupe");
  *
  * Redis being unreachable is retriable too, rather than recording without
  * dedupe: the caller's queue keeps the event until it can be done properly.
+ * The Redis client queues commands while disconnected and sends them on
+ * reconnect, so a claim that timed out here may still land later; the
+ * token-checked release sent straight after it lands after it and removes
+ * it, so the retry is not blocked until the pending claim expires.
  */
 const CLAIM_PENDING_MS = 5 * 60 * 1000;
 const DONE_RETENTION_MS = MAX_EVENT_AGE_MS;
@@ -40,11 +45,15 @@ export async function claimEvent(siteId: number, eventId: string | undefined): P
   if (!eventId) return NO_CLAIM;
 
   const key = eventDedupeKey(siteId, eventId);
+  const token = randomUUID();
   let state;
   try {
-    state = await claimEventId(key, CLAIM_PENDING_MS);
+    state = await claimEventId(key, CLAIM_PENDING_MS, token);
   } catch (error) {
     logger.error(error as Error, "Redis event-id claim failed");
+    // Not awaited: it runs whenever the claim does, and its own failure only
+    // leaves the claim to expire.
+    void releaseEventId(key, token).catch(() => {});
     throw new RetryableIngestError("event-id dedupe is unavailable");
   }
 
@@ -64,7 +73,7 @@ export async function claimEvent(siteId: number, eventId: string | undefined): P
     },
     release: async () => {
       try {
-        await releaseEventId(key);
+        await releaseEventId(key, token);
       } catch (error) {
         // The pending claim expires on its own; until then retries get a 503.
         logger.error({ err: error, siteId, eventId }, "Could not release an event-id claim after a failed ingest");

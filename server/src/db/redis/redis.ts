@@ -4,7 +4,7 @@ import { API_RATE_LIMIT_LUA } from "./apiRateLimitLua.js";
 import { IMPORT_LOCK_RELEASE_LUA, IMPORT_QUOTA_RESERVE_LUA } from "./importQuotaLua.js";
 import { REPLAY_BUDGET_LUA } from "./replayBudgetLua.js";
 import { STICKY_RESOLVE_LUA } from "./stickyResolveLua.js";
-import { CLAIM_EVENT_ID_LUA, EVENT_TIME_SESSION_LUA } from "./eventTimeSessionLua.js";
+import { CLAIM_EVENT_ID_LUA, EVENT_TIME_SESSION_LUA, RELEASE_EVENT_ID_LUA } from "./eventTimeSessionLua.js";
 
 const logger = createServiceLogger("redis");
 
@@ -91,6 +91,7 @@ export function sessionGetOrCreate(key: string, candidateId: string, ttlMs: numb
 // server-side events that carry their own time (see eventTimeSessionLua.ts).
 sessionRedis.defineCommand("eventTimeSession", { numberOfKeys: 1, lua: EVENT_TIME_SESSION_LUA });
 sessionRedis.defineCommand("claimEventId", { numberOfKeys: 1, lua: CLAIM_EVENT_ID_LUA });
+sessionRedis.defineCommand("releaseEventId", { numberOfKeys: 1, lua: RELEASE_EVENT_ID_LUA });
 
 interface EventTimeRedis extends Redis {
   eventTimeSession(
@@ -101,7 +102,8 @@ interface EventTimeRedis extends Redis {
     retentionMs: number,
     maxSpans: number
   ): Promise<string>;
-  claimEventId(key: string, pendingMs: number): Promise<string>;
+  claimEventId(key: string, pendingMs: number, token: string): Promise<string>;
+  releaseEventId(key: string, token: string): Promise<number>;
 }
 
 /** The session id for an event at `eventMs`, by event time rather than arrival. Atomic across workers. */
@@ -126,9 +128,9 @@ export function eventTimeSession(
 
 export type EventIdClaim = "claimed" | "pending" | "done";
 
-/** Claim `key` as pending; or report that another delivery has it pending, or already recorded it. */
-export async function claimEventId(key: string, pendingMs: number): Promise<EventIdClaim> {
-  return (await (sessionRedis as EventTimeRedis).claimEventId(key, pendingMs)) as EventIdClaim;
+/** Claim `key` as pending under `token`; or report that another delivery has it pending, or already recorded it. */
+export async function claimEventId(key: string, pendingMs: number, token: string): Promise<EventIdClaim> {
+  return (await (sessionRedis as EventTimeRedis).claimEventId(key, pendingMs, token)) as EventIdClaim;
 }
 
 /** Mark a claimed event as recorded, so every later delivery is dropped as a duplicate. */
@@ -136,9 +138,12 @@ export async function completeEventId(key: string, retentionMs: number): Promise
   await sessionRedis.set(key, "done", "PX", retentionMs);
 }
 
-/** Give a claim back, so a delivery that failed to record its event can be retried. */
-export async function releaseEventId(key: string): Promise<void> {
-  await sessionRedis.del(key);
+/**
+ * Give a pending claim back, so a delivery that failed to record its event can
+ * be retried. Only the claim made with `token` is removed.
+ */
+export async function releaseEventId(key: string, token: string): Promise<void> {
+  await (sessionRedis as EventTimeRedis).releaseEventId(key, token);
 }
 
 // Dedicated connection for sticky identity re-attachment, isolated for the same

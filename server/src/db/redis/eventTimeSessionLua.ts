@@ -109,16 +109,18 @@ return chosen.id
  *
  * KEYS[1] dedupe key for one (site, event id)
  * ARGV[1] how long a claim stays pending, milliseconds
+ * ARGV[2] this delivery's claim token
  *
- * A claim is "pending" while one delivery records the event, and "done" once
- * the event is stored. A pending claim expires on its own, so a delivery that
- * died mid-way does not block the retry for long.
+ * A claim is "pending:<token>" while one delivery records the event, and
+ * "done" once the event is stored. A pending claim expires on its own, so a
+ * delivery that died mid-way does not block the retry for long; its token lets
+ * it give the claim back without ever removing another delivery's.
  *
  * Returns "claimed" (this delivery records the event), "pending" (another
  * delivery is recording it now) or "done" (already recorded).
  */
 export const CLAIM_EVENT_ID_LUA = `
-if redis.call('SET', KEYS[1], 'pending', 'NX', 'PX', tonumber(ARGV[1])) then
+if redis.call('SET', KEYS[1], 'pending:' .. ARGV[2], 'NX', 'PX', tonumber(ARGV[1])) then
   return 'claimed'
 end
 local state = redis.call('GET', KEYS[1])
@@ -126,4 +128,17 @@ if state == 'done' then
   return 'done'
 end
 return 'pending'
+`;
+
+/**
+ * sp3n/rybbit fork: give back a pending claim, only if it is still this
+ * delivery's (CLAIM_EVENT_ID_LUA).
+ *
+ * KEYS[1] dedupe key; ARGV[1] the claim token. Returns 1 if released.
+ */
+export const RELEASE_EVENT_ID_LUA = `
+if redis.call('GET', KEYS[1]) == 'pending:' .. ARGV[1] then
+  return redis.call('DEL', KEYS[1])
+end
+return 0
 `;

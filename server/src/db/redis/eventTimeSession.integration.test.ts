@@ -1,6 +1,6 @@
 import RedisMock from "ioredis-mock";
 import { beforeEach, describe, expect, it } from "vitest";
-import { CLAIM_EVENT_ID_LUA, EVENT_TIME_SESSION_LUA } from "./eventTimeSessionLua.js";
+import { CLAIM_EVENT_ID_LUA, EVENT_TIME_SESSION_LUA, RELEASE_EVENT_ID_LUA } from "./eventTimeSessionLua.js";
 
 // sp3n/rybbit fork: behavioural tests for event-time sessions and event-id
 // dedupe, executed for real by ioredis-mock's embedded Lua runtime.
@@ -19,7 +19,8 @@ interface EventTimeMockRedis {
     retentionMs: number,
     maxSpans: number
   ): Promise<string>;
-  claimEventId(key: string, pendingMs: number): Promise<string>;
+  claimEventId(key: string, pendingMs: number, token: string): Promise<string>;
+  releaseEventId(key: string, token: string): Promise<number>;
   set(key: string, value: string): Promise<unknown>;
   get(key: string): Promise<string | null>;
   del(key: string): Promise<number>;
@@ -197,40 +198,56 @@ describe("claimEventId Lua script", () => {
   beforeEach(async () => {
     const client = new RedisMock();
     client.defineCommand("claimEventId", { numberOfKeys: 1, lua: CLAIM_EVENT_ID_LUA });
+    client.defineCommand("releaseEventId", { numberOfKeys: 1, lua: RELEASE_EVENT_ID_LUA });
     redis = client as unknown as EventTimeMockRedis;
     await redis.flushall();
   });
 
   it("claims an event id as pending, then reports it pending to a concurrent delivery", async () => {
-    expect(await redis.claimEventId("event-id:1:env-1", PENDING_MS)).toBe("claimed");
-    expect(await redis.get("event-id:1:env-1")).toBe("pending");
-    expect(await redis.claimEventId("event-id:1:env-1", PENDING_MS)).toBe("pending");
+    expect(await redis.claimEventId("event-id:1:env-1", PENDING_MS, "t1")).toBe("claimed");
+    expect(await redis.get("event-id:1:env-1")).toBe("pending:t1");
+    expect(await redis.claimEventId("event-id:1:env-1", PENDING_MS, "t1")).toBe("pending");
   });
 
   it("reports an event id marked done as a duplicate", async () => {
-    await redis.claimEventId("event-id:1:env-1", PENDING_MS);
+    await redis.claimEventId("event-id:1:env-1", PENDING_MS, "t1");
     await redis.set("event-id:1:env-1", "done");
 
-    expect(await redis.claimEventId("event-id:1:env-1", PENDING_MS)).toBe("done");
+    expect(await redis.claimEventId("event-id:1:env-1", PENDING_MS, "t1")).toBe("done");
   });
 
   it("lets a pending claim expire, so a delivery that died does not block its retry for long", async () => {
-    await redis.claimEventId("event-id:1:env-1", PENDING_MS);
+    await redis.claimEventId("event-id:1:env-1", PENDING_MS, "t1");
     const ttl = await redis.pttl("event-id:1:env-1");
 
     expect(ttl).toBeGreaterThan(PENDING_MS - 5_000);
     expect(ttl).toBeLessThanOrEqual(PENDING_MS);
   });
 
+  it("releases only the claim made with the same token", async () => {
+    await redis.claimEventId("event-id:1:env-1", PENDING_MS, "t1");
+
+    expect(await redis.releaseEventId("event-id:1:env-1", "someone-else")).toBe(0);
+    expect(await redis.get("event-id:1:env-1")).toBe("pending:t1");
+  });
+
+  it("never releases a recorded event", async () => {
+    await redis.claimEventId("event-id:1:env-1", PENDING_MS, "t1");
+    await redis.set("event-id:1:env-1", "done");
+
+    expect(await redis.releaseEventId("event-id:1:env-1", "t1")).toBe(0);
+    expect(await redis.get("event-id:1:env-1")).toBe("done");
+  });
+
   it("scopes claims by site, so demo and retail never collide", async () => {
-    expect(await redis.claimEventId("event-id:1:env-1", PENDING_MS)).toBe("claimed");
-    expect(await redis.claimEventId("event-id:2:env-1", PENDING_MS)).toBe("claimed");
+    expect(await redis.claimEventId("event-id:1:env-1", PENDING_MS, "t1")).toBe("claimed");
+    expect(await redis.claimEventId("event-id:2:env-1", PENDING_MS, "t2")).toBe("claimed");
   });
 
   it("can be claimed again once released", async () => {
-    await redis.claimEventId("event-id:1:env-1", PENDING_MS);
-    await redis.del("event-id:1:env-1");
+    await redis.claimEventId("event-id:1:env-1", PENDING_MS, "t1");
+    expect(await redis.releaseEventId("event-id:1:env-1", "t1")).toBe(1);
 
-    expect(await redis.claimEventId("event-id:1:env-1", PENDING_MS)).toBe("claimed");
+    expect(await redis.claimEventId("event-id:1:env-1", PENDING_MS, "t1")).toBe("claimed");
   });
 });
