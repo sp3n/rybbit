@@ -344,7 +344,7 @@ async function analyticsRoutes(fastify: FastifyInstance) {
   fastify.get("/sites/:siteId/live-user-count", { logLevel: "silent", ...publicAnalyticsRead }, getLiveUsercount);
   fastify.get("/sites/:siteId/overview", cachedAnalyticsRead, getOverview);
   fastify.get("/sites/:siteId/overview/time-series", cachedAnalyticsRead, getOverviewBucketed);
-  // sp3n/rybbit fork: deprecated alias kept for Memon clients deployed before
+  // sp3n/rybbit fork: deprecated alias kept for older clients deployed before
   // upstream renamed this route.
   fastify.get("/sites/:siteId/overview-bucketed", cachedAnalyticsRead, getOverviewBucketed);
   // sp3n/rybbit fork: game analytics for "game" sites.
