@@ -79,3 +79,21 @@ describe("the page metadata limits on an ingested payload", () => {
     expect(result.success && truncateUrlForStorage(result.data)).toBe(result.success && result.data);
   });
 });
+
+// sp3n/rybbit fork: the fields a trusted bridge sends with each event.
+describe("the event time and id on an ingested payload", () => {
+  it("accepts an ISO 8601 timestamp with a UTC offset and an event id", () => {
+    expect(pageview({ timestamp: "2026-11-07T08:15:00.250Z", event_id: "01J9Z-abc_1:2.3" }).success).toBe(true);
+    expect(pageview({ timestamp: "2026-11-07T09:15:00+01:00" }).success).toBe(true);
+  });
+
+  it("rejects a timestamp that is not an ISO 8601 date-time", () => {
+    expect(pageview({ timestamp: "07/11/2026 08:15" }).success).toBe(false);
+    expect(pageview({ timestamp: 1794046500000 }).success).toBe(false);
+  });
+
+  it("rejects an event id with characters outside the key alphabet, or too long", () => {
+    expect(pageview({ event_id: "has space" }).success).toBe(false);
+    expect(pageview({ event_id: "a".repeat(129) }).success).toBe(false);
+  });
+});

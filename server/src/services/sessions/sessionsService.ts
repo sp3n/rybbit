@@ -1,13 +1,20 @@
 import crypto from "crypto";
 import { nanoid } from "nanoid";
 import { createServiceLogger } from "../../lib/logger/logger.js";
-import { sessionRedis, sessionGetOrCreate } from "../../db/redis/redis.js";
+import { eventTimeSession, sessionRedis, sessionGetOrCreate } from "../../db/redis/redis.js";
+import { MAX_EVENT_AGE_MS } from "../tracker/eventTime.js";
 import { pickReplaySession, REPLAY_SESSION_LUA } from "./replaySession.js";
 
 // Sessions expire after this much inactivity. Redis refreshes the TTL on every
 // event (sliding window) and evicts the key automatically once it lapses — there
 // is no table to scan and no cleanup cron to run.
 const SESSION_TTL_MS = 30 * 60 * 1000;
+
+// sp3n/rybbit fork: how long an event-time session key outlives its last
+// event, wall-clock. As long as the oldest event a trusted caller may send
+// (eventTime.ts), so a session open when an outage began is still known when
+// the backlog drains. See eventTimeSessionLua.ts.
+const EVENT_TIME_SESSION_RETENTION_MS = MAX_EVENT_AGE_MS;
 
 // Bounded in-process mirror of the last session id Redis handed back for each
 // (siteId, session identity). It exists purely so a transient Redis failure can
@@ -61,14 +68,24 @@ export class SessionsService {
     identifiedUserId,
     siteId,
     identifiedUserOnly = false,
+    eventTimeMs,
   }: {
     userId: string;
     identifiedUserId?: string;
     siteId: number;
     identifiedUserOnly?: boolean;
+    /**
+     * sp3n/rybbit fork: the event's own time, when a trusted caller supplied it.
+     * The session is then decided by event time, not by arrival.
+     */
+    eventTimeMs?: number;
   }): Promise<{ sessionId: string }> {
     const key = this.getSessionKey(userId, siteId, identifiedUserId, identifiedUserOnly);
     const candidate = nanoid(14);
+
+    if (eventTimeMs !== undefined) {
+      return this.updateEventTimeSession(`event-time:${key}`, candidate, eventTimeMs);
+    }
 
     try {
       const sessionId = await sessionGetOrCreate(key, candidate, SESSION_TTL_MS);
@@ -80,6 +97,28 @@ export class SessionsService {
       // window) so their events stay glued together until Redis recovers; only
       // mint a fresh id if we've genuinely never seen them on this worker.
       this.logger.error(error as Error, "Redis session lookup failed; using in-process fallback session id");
+      return { sessionId: this.fallbackSessionId(key, candidate) };
+    }
+  }
+
+  /**
+   * sp3n/rybbit fork: resolve a session by the event's own time
+   * (eventTimeSessionLua.ts). On a Redis failure this degrades to the
+   * wall-clock fallback mirror, as updateSession does.
+   */
+  private async updateEventTimeSession(key: string, candidate: string, eventTimeMs: number) {
+    try {
+      const sessionId = await eventTimeSession(
+        key,
+        candidate,
+        eventTimeMs,
+        SESSION_TTL_MS,
+        EVENT_TIME_SESSION_RETENTION_MS
+      );
+      this.rememberSession(this.fallbackCache, key, sessionId);
+      return { sessionId };
+    } catch (error) {
+      this.logger.error(error as Error, "Redis event-time session lookup failed; using in-process fallback session id");
       return { sessionId: this.fallbackSessionId(key, candidate) };
     }
   }

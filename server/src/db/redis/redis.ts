@@ -4,6 +4,7 @@ import { API_RATE_LIMIT_LUA } from "./apiRateLimitLua.js";
 import { IMPORT_LOCK_RELEASE_LUA, IMPORT_QUOTA_RESERVE_LUA } from "./importQuotaLua.js";
 import { REPLAY_BUDGET_LUA } from "./replayBudgetLua.js";
 import { STICKY_RESOLVE_LUA } from "./stickyResolveLua.js";
+import { CLAIM_EVENT_ID_LUA, EVENT_TIME_SESSION_LUA } from "./eventTimeSessionLua.js";
 
 const logger = createServiceLogger("redis");
 
@@ -84,6 +85,38 @@ interface SessionRedis extends Redis {
  */
 export function sessionGetOrCreate(key: string, candidateId: string, ttlMs: number): Promise<string> {
   return (sessionRedis as SessionRedis).sessionGetOrCreate(key, candidateId, ttlMs);
+}
+
+// sp3n/rybbit fork: event-time sessions and event-id dedupe for trusted
+// server-side events that carry their own time (see eventTimeSessionLua.ts).
+sessionRedis.defineCommand("eventTimeSession", { numberOfKeys: 1, lua: EVENT_TIME_SESSION_LUA });
+sessionRedis.defineCommand("claimEventId", { numberOfKeys: 1, lua: CLAIM_EVENT_ID_LUA });
+
+interface EventTimeRedis extends Redis {
+  eventTimeSession(key: string, candidateId: string, eventMs: number, gapMs: number, retentionMs: number): Promise<string>;
+  claimEventId(key: string, retentionMs: number): Promise<number>;
+}
+
+/** The session id for an event at `eventMs`, by event time rather than arrival. Atomic across workers. */
+export function eventTimeSession(
+  key: string,
+  candidateId: string,
+  eventMs: number,
+  gapMs: number,
+  retentionMs: number
+): Promise<string> {
+  // Integer text, so the script stores the time exactly as given.
+  return (sessionRedis as EventTimeRedis).eventTimeSession(key, candidateId, Math.trunc(eventMs), gapMs, retentionMs);
+}
+
+/** True when this call claimed `key`; false when another delivery already did. */
+export async function claimEventId(key: string, retentionMs: number): Promise<boolean> {
+  return (await (sessionRedis as EventTimeRedis).claimEventId(key, retentionMs)) === 1;
+}
+
+/** Give a claim back, so a delivery that failed to record its event can be retried. */
+export async function releaseEventId(key: string): Promise<void> {
+  await sessionRedis.del(key);
 }
 
 // Dedicated connection for sticky identity re-attachment, isolated for the same

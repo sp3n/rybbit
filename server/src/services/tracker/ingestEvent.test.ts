@@ -13,6 +13,8 @@ const mocks = vi.hoisted(() => ({
   updateSession: vi.fn(),
   generateUserId: vi.fn(),
   generateUserIdFromClientId: vi.fn(),
+  claimEvent: vi.fn(),
+  releaseClaim: vi.fn(),
 }));
 
 vi.mock("../usageService.js", () => ({
@@ -45,6 +47,10 @@ vi.mock("../userId/userIdService.js", () => ({
     generateUserId: mocks.generateUserId,
     generateUserIdFromClientId: mocks.generateUserIdFromClientId,
   },
+}));
+
+vi.mock("./eventDedupe.js", () => ({
+  claimEvent: mocks.claimEvent,
 }));
 
 import { ingestEvent } from "./ingestEvent.js";
@@ -84,6 +90,7 @@ function trackingRequest(overrides: Partial<TrackingRequest> = {}): TrackingRequ
     headers: { "user-agent": "Mozilla/5.0" },
     lookupAsn,
     receivedAt: new Date("2026-08-14T10:38:37.000Z"),
+    eventTimeSupplied: false,
     ...overrides,
   };
 }
@@ -98,6 +105,7 @@ describe("ingestEvent", () => {
     mocks.updateSession.mockResolvedValue({ sessionId: "session-alice" });
     mocks.generateUserId.mockResolvedValue("shared-fingerprint");
     mocks.addPageview.mockResolvedValue(undefined);
+    mocks.claimEvent.mockResolvedValue({ duplicate: false, release: mocks.releaseClaim });
   });
 
   it("queues an accepted event with its session and resolved identity", async () => {
@@ -332,5 +340,72 @@ describe("ingestEvent", () => {
       // The event's own instant decides its salt day, not the clock at hash time.
       receivedAt: new Date("2026-08-14T10:38:37.000Z"),
     });
+  });
+});
+
+// sp3n/rybbit fork: a trusted bridge's event time and redelivery.
+describe("ingestEvent event time and dedupe", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.decideSiteExclusion.mockResolvedValue({ excluded: false });
+    mocks.isSiteOverLimit.mockReturnValue(false);
+    mocks.isSiteWithoutPlan.mockReturnValue(false);
+    mocks.checkBotBlocking.mockResolvedValue(null);
+    mocks.updateSession.mockResolvedValue({ sessionId: "session-alice" });
+    mocks.generateUserId.mockResolvedValue("shared-fingerprint");
+    mocks.addPageview.mockResolvedValue(undefined);
+    mocks.claimEvent.mockResolvedValue({ duplicate: false, release: mocks.releaseClaim });
+  });
+
+  const replayed = () =>
+    trackingRequest({
+      trustedServerSideIngestion: true,
+      receivedAt: new Date("2026-11-07T08:15:00.250Z"),
+      eventTimeSupplied: true,
+      eventId: "env-1",
+      payload: { type: "custom_event", site_id: "site_abc", event_name: "level_start", user_id: "player-7" } as TrackingRequest["payload"],
+    });
+
+  it("stores a supplied event time and sessions it by event time", async () => {
+    await ingestEvent(replayed());
+
+    expect(mocks.updateSession).toHaveBeenCalledWith(
+      expect.objectContaining({ identifiedUserOnly: true, eventTimeMs: Date.parse("2026-11-07T08:15:00.250Z") })
+    );
+    expect(mocks.addPageview).toHaveBeenCalledWith(expect.objectContaining({ timestamp: "2026-11-07T08:15:00.250Z" }));
+  });
+
+  it("sessions by arrival when no event time was supplied", async () => {
+    await ingestEvent(trackingRequest());
+
+    expect(mocks.updateSession).toHaveBeenCalledWith(expect.objectContaining({ eventTimeMs: undefined }));
+  });
+
+  it("claims the event id for the site", async () => {
+    await ingestEvent(replayed());
+
+    expect(mocks.claimEvent).toHaveBeenCalledWith(42, "env-1");
+  });
+
+  it("drops a redelivered event before any other work", async () => {
+    mocks.claimEvent.mockResolvedValue({ duplicate: true });
+
+    expect(await ingestEvent(replayed())).toEqual({ status: "duplicate" });
+    expect(mocks.decideSiteExclusion).not.toHaveBeenCalled();
+    expect(mocks.updateSession).not.toHaveBeenCalled();
+    expect(mocks.addPageview).not.toHaveBeenCalled();
+  });
+
+  it("gives the claim back when recording fails, so a retry is not dropped", async () => {
+    mocks.addPageview.mockRejectedValue(new Error("queue down"));
+
+    await expect(ingestEvent(replayed())).rejects.toThrow("queue down");
+    expect(mocks.releaseClaim).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the claim once the event is recorded", async () => {
+    await ingestEvent(replayed());
+
+    expect(mocks.releaseClaim).not.toHaveBeenCalled();
   });
 });

@@ -120,7 +120,13 @@ export function clearSelfReferrer(referrer: string, hostname: string): string {
  */
 export async function createBasePayload(trackingRequest: TrackingRequest): Promise<TotalTrackingPayload> {
   const { payload, site, ipAddress, userAgent } = trackingRequest;
-  const { ip_address: _ipAddressOverride, user_agent: _userAgentOverride, ...payloadBody } = payload;
+  const {
+    ip_address: _ipAddressOverride,
+    user_agent: _userAgentOverride,
+    timestamp: _timestampOverride,
+    event_id: _eventId,
+    ...payloadBody
+  } = payload;
 
   const anonymousId = payload.anonymous_id
     ? await userIdService.generateUserIdFromClientId(payload.anonymous_id, site.siteId, {

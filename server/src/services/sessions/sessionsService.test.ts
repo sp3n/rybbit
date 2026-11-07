@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   sessionGetOrCreate: vi.fn(),
+  eventTimeSession: vi.fn(),
   eval: vi.fn(),
   quit: vi.fn(),
 }));
@@ -9,6 +10,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock("../../db/redis/redis.js", () => ({
   sessionRedis: { quit: mocks.quit, eval: (...args: unknown[]) => mocks.eval(...args) },
   sessionGetOrCreate: (...args: unknown[]) => mocks.sessionGetOrCreate(...args),
+  eventTimeSession: (...args: unknown[]) => mocks.eventTimeSession(...args),
 }));
 
 import { SessionsService } from "./sessionsService.js";
@@ -282,5 +284,62 @@ describe("SessionsService.resolveReplaySession", () => {
     // The replay waits for a full snapshot before following it.
     expect(await replayBatch()).toEqual({ sessionId: "sess-real", needsFullSnapshot: true });
     expect(await replayBatch(true)).toEqual({ sessionId: event.sessionId, needsFullSnapshot: false });
+  });
+});
+
+// sp3n/rybbit fork: sessions decided by a trusted caller's event time.
+describe("SessionsService event-time sessions", () => {
+  let service: SessionsService;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-11-07T12:00:00.000Z"));
+    mocks.sessionGetOrCreate.mockReset();
+    mocks.eventTimeSession.mockReset();
+    service = new SessionsService();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("resolves by event time on a key apart from the wall-clock session", async () => {
+    mocks.eventTimeSession.mockResolvedValue("sess-event-time");
+    const eventTimeMs = Date.parse("2026-11-07T08:15:00.000Z");
+
+    const result = await service.updateSession({ userId: "u1", siteId: 42, eventTimeMs });
+
+    expect(result.sessionId).toBe("sess-event-time");
+    expect(mocks.sessionGetOrCreate).not.toHaveBeenCalled();
+    const [key, candidate, eventMs, gapMs, retentionMs] = mocks.eventTimeSession.mock.calls[0];
+    expect(key).toBe("event-time:session:42:u1");
+    expect(candidate).toHaveLength(14);
+    expect(eventMs).toBe(eventTimeMs);
+    expect(gapMs).toBe(SESSION_TTL_MS);
+    expect(retentionMs).toBe(15 * 24 * 60 * 60 * 1000);
+  });
+
+  it("keeps an identified server-side player on one key across sites only per site", async () => {
+    mocks.eventTimeSession.mockResolvedValue("x");
+    const eventTimeMs = Date.parse("2026-11-07T08:15:00.000Z");
+
+    await service.updateSession({ userId: "fp", identifiedUserId: "player-7", identifiedUserOnly: true, siteId: 1, eventTimeMs });
+    await service.updateSession({ userId: "fp-other-day", identifiedUserId: "player-7", identifiedUserOnly: true, siteId: 1, eventTimeMs });
+    await service.updateSession({ userId: "fp", identifiedUserId: "player-7", identifiedUserOnly: true, siteId: 2, eventTimeMs });
+
+    const keys = mocks.eventTimeSession.mock.calls.map(call => call[0]);
+    expect(keys[0]).toBe(keys[1]); // a new salt day's fingerprint does not split the player
+    expect(keys[2]).not.toBe(keys[0]); // demo and retail sites stay apart
+    expect(keys[0]).toMatch(/^event-time:session:1:identified-server:/);
+  });
+
+  it("falls back in-process when Redis fails, without splitting the player", async () => {
+    mocks.eventTimeSession.mockRejectedValue(new Error("redis down"));
+    const eventTimeMs = Date.parse("2026-11-07T08:15:00.000Z");
+
+    const first = await service.updateSession({ userId: "u1", siteId: 42, eventTimeMs });
+    const second = await service.updateSession({ userId: "u1", siteId: 42, eventTimeMs: eventTimeMs + 60_000 });
+
+    expect(second.sessionId).toBe(first.sessionId);
   });
 });

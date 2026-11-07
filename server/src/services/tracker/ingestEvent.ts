@@ -4,6 +4,7 @@ import { decideSiteExclusion, type SiteExclusionDecision } from "../sites/siteEx
 import { usageService } from "../usageService.js";
 import { botEventQueue, botObservationQueue } from "./botBlocking/botEventQueue.js";
 import { checkBotBlocking } from "./botBlocking/index.js";
+import { claimEvent } from "./eventDedupe.js";
 import { pageviewQueue } from "./pageviewQueue.js";
 import { truncateUrlForStorage } from "./trackingPayload.js";
 import type { TrackingRequest } from "./trackingRequest.js";
@@ -23,7 +24,29 @@ export type IngestOutcome =
   | { status: "over_limit" }
   | { status: "no_plan" }
   | { status: "bot" }
-  | { status: "tracked"; sessionId: string };
+  | { status: "tracked"; sessionId: string }
+  // sp3n/rybbit fork: a trusted caller redelivered an event it already sent.
+  | { status: "duplicate" };
+
+/**
+ * sp3n/rybbit fork: an event a trusted caller marked with `event_id` is
+ * recorded at most once (eventDedupe.ts). The claim is given back if recording
+ * throws, so the caller's retry is not mistaken for a duplicate.
+ */
+export async function ingestEvent(trackingRequest: TrackingRequest): Promise<IngestOutcome> {
+  const claim = await claimEvent(trackingRequest.site.siteId, trackingRequest.eventId);
+  if (claim.duplicate) {
+    logger.debug({ siteId: trackingRequest.site.siteId }, "Dropped a redelivered event");
+    return { status: "duplicate" };
+  }
+
+  try {
+    return await recordEvent(trackingRequest);
+  } catch (error) {
+    await claim.release();
+    throw error;
+  }
+}
 
 /**
  * Take one resolved Tracking Request through the ingestion pipeline.
@@ -45,7 +68,7 @@ export type IngestOutcome =
  *   5. Enqueue — to `bot_events` if the detection is enforced, otherwise to
  *      `events` plus, when something was detected, `bot_observations`.
  */
-export async function ingestEvent(trackingRequest: TrackingRequest): Promise<IngestOutcome> {
+async function recordEvent(trackingRequest: TrackingRequest): Promise<IngestOutcome> {
   const { site } = trackingRequest;
 
   // Matched against the URL whole: a query string cut to its column limit
@@ -116,6 +139,8 @@ export async function ingestEvent(trackingRequest: TrackingRequest): Promise<Ing
     identifiedUserId: eventPayload.identifiedUserId,
     identifiedUserOnly: trackingRequest.trustedServerSideIngestion,
     siteId: site.siteId,
+    // sp3n/rybbit fork: a trusted caller's event time decides the session.
+    eventTimeMs: trackingRequest.eventTimeSupplied ? trackingRequest.receivedAt.getTime() : undefined,
   });
 
   await pageviewQueue.add({

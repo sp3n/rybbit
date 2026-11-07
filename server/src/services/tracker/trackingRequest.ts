@@ -4,6 +4,7 @@ import { checkApiKey } from "../../lib/auth-utils.js";
 import { hasScope } from "../../lib/scopes.js";
 import { siteConfig, type SiteConfigData } from "../../lib/siteConfig.js";
 import { getRequestUserAgent } from "../../utils.js";
+import { EventTimeError, resolveEventTime } from "./eventTime.js";
 import { collectCandidateClientIps, resolveClientIp } from "./resolveClientIp.js";
 import type { ValidatedTrackingPayload } from "./trackingPayload.js";
 
@@ -47,12 +48,20 @@ export interface TrackingRequest {
   /** Request-scoped ASN resolver: each IP is looked up at most once per event. */
   lookupAsn: AsnLookup;
   /**
-   * When the request arrived. This is the event's timestamp *and* the instant
+   * When the event happened. This is the event's timestamp *and* the instant
    * that decides which UTC day its salted fingerprint belongs to, so the two can
    * never disagree about the day.
+   *
+   * sp3n/rybbit fork: the arrival time, unless a trusted caller supplied the
+   * event's own time (see eventTime.ts).
    */
   receivedAt: Date;
+  /** sp3n/rybbit fork: `receivedAt` is a trusted caller's event time, not the arrival time. */
+  eventTimeSupplied: boolean;
+  /** sp3n/rybbit fork: a trusted caller's idempotency key for this event; undefined otherwise. */
+  eventId?: string;
 }
+
 
 /**
  * Whether a bearer token authorises this request to declare its own client IP
@@ -83,7 +92,7 @@ export async function resolveTrackingRequest(
 ): Promise<TrackingRequest | null> {
   // Stamped before the first await: a cold Site Configuration read or a slow
   // API-key check must not push the event's time forward into another bucket.
-  const receivedAt = new Date();
+  const arrivedAt = new Date();
 
   const site = await siteConfig.getConfig(payload.site_id);
   if (!site) return null;
@@ -99,6 +108,12 @@ export async function resolveTrackingRequest(
   const ipAddress = trustedServerSideIngestion ? payload.ip_address || requestIpAddress : requestIpAddress;
   const userAgent = trustedServerSideIngestion ? payload.user_agent || requestUserAgent : requestUserAgent;
 
+  // Likewise for the event's time and idempotency key.
+  const eventTime = resolveEventTime(payload.timestamp, trustedServerSideIngestion, arrivedAt);
+  if (!eventTime.ok) {
+    throw new EventTimeError(eventTime.error);
+  }
+
   return {
     payload,
     site,
@@ -108,6 +123,8 @@ export async function resolveTrackingRequest(
     trustedServerSideIngestion,
     headers: request.headers,
     lookupAsn,
-    receivedAt,
+    receivedAt: eventTime.eventTime,
+    eventTimeSupplied: eventTime.supplied,
+    eventId: trustedServerSideIngestion ? payload.event_id : undefined,
   };
 }

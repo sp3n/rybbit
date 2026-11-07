@@ -1,5 +1,5 @@
 import type { FastifyRequest } from "fastify";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ValidatedTrackingPayload } from "./trackingPayload.js";
 
 const mocks = vi.hoisted(() => ({
@@ -27,6 +27,7 @@ vi.mock("../../db/geolocation/asn.js", async importOriginal => {
   };
 });
 
+import { EventTimeError } from "./eventTime.js";
 import { resolveTrackingRequest } from "./trackingRequest.js";
 
 const site = {
@@ -145,5 +146,77 @@ describe("resolveTrackingRequest", () => {
     );
 
     expect(resolved!.ipAddress).toBe("198.51.100.20");
+  });
+});
+
+// sp3n/rybbit fork: a trusted bridge supplies each event's own time and id.
+describe("resolveTrackingRequest event time and id", () => {
+  const trusted = () =>
+    mocks.checkApiKey.mockResolvedValue({ valid: true, statements: { ingest: ["write"] } });
+  const bearer = () => request({ authorization: "Bearer sk_test" });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-11-07T12:00:00.000Z"));
+    mocks.getConfig.mockResolvedValue(site);
+    mocks.lookupAsn.mockReturnValue(null);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("records a trusted caller's event time instead of the arrival time", async () => {
+    trusted();
+
+    const resolved = await resolveTrackingRequest(
+      bearer(),
+      payload({ timestamp: "2026-11-07T10:15:30.250Z", event_id: "env-1" })
+    );
+
+    expect(resolved!.receivedAt.toISOString()).toBe("2026-11-07T10:15:30.250Z");
+    expect(resolved!.eventTimeSupplied).toBe(true);
+    expect(resolved!.eventId).toBe("env-1");
+  });
+
+  it("ignores an untrusted caller's timestamp and event id", async () => {
+    const resolved = await resolveTrackingRequest(
+      request({}),
+      payload({ timestamp: "2026-11-01T00:00:00.000Z", event_id: "env-1" })
+    );
+
+    expect(resolved!.receivedAt.toISOString()).toBe("2026-11-07T12:00:00.000Z");
+    expect(resolved!.eventTimeSupplied).toBe(false);
+    expect(resolved!.eventId).toBeUndefined();
+  });
+
+  it("ignores the timestamp of a bearer without ingest:write", async () => {
+    mocks.checkApiKey.mockResolvedValue({ valid: true, statements: { site: ["read"] } });
+
+    const resolved = await resolveTrackingRequest(bearer(), payload({ timestamp: "2026-11-01T00:00:00.000Z" }));
+
+    expect(resolved!.receivedAt.toISOString()).toBe("2026-11-07T12:00:00.000Z");
+    expect(resolved!.eventTimeSupplied).toBe(false);
+  });
+
+  it("refuses a trusted timestamp out of bounds", async () => {
+    trusted();
+
+    await expect(
+      resolveTrackingRequest(bearer(), payload({ timestamp: "2026-11-07T12:10:00.000Z" }))
+    ).rejects.toBeInstanceOf(EventTimeError);
+    await expect(
+      resolveTrackingRequest(bearer(), payload({ timestamp: "2026-10-22T11:59:00.000Z" }))
+    ).rejects.toBeInstanceOf(EventTimeError);
+  });
+
+  it("keeps the arrival time when a trusted caller sends no timestamp", async () => {
+    trusted();
+
+    const resolved = await resolveTrackingRequest(bearer(), payload());
+
+    expect(resolved!.receivedAt.toISOString()).toBe("2026-11-07T12:00:00.000Z");
+    expect(resolved!.eventTimeSupplied).toBe(false);
   });
 });

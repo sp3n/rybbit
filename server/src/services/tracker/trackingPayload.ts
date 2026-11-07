@@ -42,6 +42,15 @@ const baseEventFields = {
   visitor_id: z.string().min(1).max(64).optional(),
   ip_address: z.string().ip().optional(),
   user_agent: z.string().max(512).optional(),
+  // sp3n/rybbit fork: honoured only for a bearer with ingest:write (see
+  // eventTime.ts and ingestEvent.ts); ignored for everyone else.
+  timestamp: z.string().datetime({ offset: true }).optional(),
+  event_id: z
+    .string()
+    .min(1)
+    .max(128)
+    .regex(/^[A-Za-z0-9._:-]+$/, "event_id may contain only letters, digits, '.', '_', ':' and '-'")
+    .optional(),
   // Bounds come from the Bot Signal contract, so appending a signal bit widens
   // the accepted mask with it. Hard-coding the bound is how the 12th bit
   // (squareScreen = 2048) came to fail validation and drop the whole event.

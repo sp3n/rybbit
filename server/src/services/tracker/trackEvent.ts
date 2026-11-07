@@ -3,6 +3,7 @@ import { ZodError } from "zod";
 import { createServiceLogger } from "../../lib/logger/logger.js";
 import { ingestEvent } from "./ingestEvent.js";
 import { trackingPayloadSchema } from "./trackingPayload.js";
+import { EventTimeError } from "./eventTime.js";
 import { resolveTrackingRequest } from "./trackingRequest.js";
 
 const logger = createServiceLogger("track-event");
@@ -55,10 +56,17 @@ export async function trackEvent(request: FastifyRequest, reply: FastifyReply) {
       });
     }
 
+    if (outcome.status === "duplicate") {
+      return reply.status(200).send({ success: true, duplicate: true });
+    }
+
     return reply.status(200).send({
       success: true,
     });
   } catch (error) {
+    if (error instanceof EventTimeError) {
+      return reply.status(400).send({ success: false, error: "Invalid payload", details: error.message });
+    }
     logger.error({ err: error }, "Error tracking event");
     if (error instanceof ZodError) {
       return reply.status(400).send({
