@@ -51,6 +51,8 @@ export interface AnalyticsContextOptions {
 export function useAnalyticsContext(options: AnalyticsContextOptions = {}): {
   site: number | string;
   context: AnalyticsContext;
+  /** False when the request has no window to ask for — comparison turned off. */
+  hasPeriod: boolean;
 } {
   const storeSite = useStore(state => state.site);
   const time = useStore(state => state.time);
@@ -61,9 +63,11 @@ export function useAnalyticsContext(options: AnalyticsContextOptions = {}): {
   const site = options.site ?? storeSite;
 
   const baseTime = options.overrideTime ?? time;
+  // A comparison of "none" leaves previousTime null: there is no window to ask
+  // about, so the query is disabled rather than falling through to all-time.
   let timeToUse = options.periodTime === "previous" ? previousTime : baseTime;
 
-  if (options.doublePastMinutesForPrevious && options.periodTime === "previous" && timeToUse.mode === "past-minutes") {
+  if (options.doublePastMinutesForPrevious && options.periodTime === "previous" && timeToUse?.mode === "past-minutes") {
     timeToUse = {
       ...timeToUse,
       pastMinutesStart: timeToUse.pastMinutesStart * 2,
@@ -82,8 +86,9 @@ export function useAnalyticsContext(options: AnalyticsContextOptions = {}): {
 
   return {
     site,
+    hasPeriod: timeToUse !== null,
     context: {
-      time: (options.useTime ?? true) ? timeToUse : null,
+      time: (options.useTime ?? true) && timeToUse ? timeToUse : null,
       timeZone,
       filters: combinedFilters,
     },
@@ -91,8 +96,11 @@ export function useAnalyticsContext(options: AnalyticsContextOptions = {}): {
 }
 
 function useAnalyticsRequest(options: AnalyticsContextOptions & AnalyticsDescriptor) {
-  const { site, context } = useAnalyticsContext(options);
-  return { site, request: buildAnalyticsRequest(options, context) };
+  const { site, context, hasPeriod } = useAnalyticsContext(options);
+  const request = buildAnalyticsRequest(options, context);
+  const scope = request.organizationId === undefined ? site : `organization:${request.organizationId}`;
+  const hasScope = request.organizationId === undefined ? !!site : !!request.organizationId;
+  return { site, scope, hasScope, hasPeriod, request };
 }
 
 export interface AnalyticsQueryOptions<TData> extends AnalyticsContextOptions, AnalyticsDescriptor {
@@ -110,24 +118,24 @@ export interface AnalyticsQueryOptions<TData> extends AnalyticsContextOptions, A
 
 const buildQueryKey = (
   key: string | readonly unknown[],
-  site: number | string | undefined,
+  scope: number | string | undefined,
   request: AnalyticsRequest
-) => [...(Array.isArray(key) ? key : [key]), site, request.path, request.params, request.body];
+) => [...(Array.isArray(key) ? key : [key]), scope, request.path, request.params, request.body];
 
 export function useAnalyticsQuery<TData>(options: AnalyticsQueryOptions<TData>): UseQueryResult<TData> {
-  const { site, request } = useAnalyticsRequest(options);
+  const { site, scope, hasScope, request, hasPeriod } = useAnalyticsRequest(options);
 
   return useQuery<TData, Error>({
-    queryKey: buildQueryKey(options.key, site, request),
+    queryKey: buildQueryKey(options.key, scope, request),
     queryFn: () => fetchAnalytics<TData>(site!, request),
     staleTime: options.staleTime ?? 60_000,
     refetchInterval: options.refetchInterval,
     placeholderData:
       (options.placeholder ?? true)
         ? (previousData, previousQuery) =>
-            site !== undefined && previousQuery?.queryKey?.includes(site) ? previousData : undefined
+            scope !== undefined && previousQuery?.queryKey?.includes(scope) ? previousData : undefined
         : undefined,
-    enabled: (options.enabled ?? true) && !!site,
+    enabled: (options.enabled ?? true) && hasScope && hasPeriod,
     ...options.props,
   });
 }
@@ -143,26 +151,31 @@ export interface AnalyticsInfiniteQueryOptions<TPage, TCursor> extends Analytics
   refetchInterval?: number;
   enabled?: boolean;
   refetchOnWindowFocus?: boolean;
+  // Hand the query's abort signal to the request. Cancelling the query (or unmounting its last
+  // observer) then aborts the request and stops a refetch before it walks the remaining pages.
+  abortable?: boolean;
 }
 
 export function useAnalyticsInfiniteQuery<TPage, TCursor = number>(
   options: AnalyticsInfiniteQueryOptions<TPage, TCursor>
 ): UseInfiniteQueryResult<InfiniteData<TPage>> {
-  const { site, request } = useAnalyticsRequest(options);
+  const { site, scope, hasScope, request, hasPeriod } = useAnalyticsRequest(options);
 
   return useInfiniteQuery<TPage, Error, InfiniteData<TPage>, readonly unknown[], TCursor>({
-    queryKey: [...buildQueryKey(options.key, site, request), "infinite"],
-    queryFn: ({ pageParam }) =>
-      fetchAnalytics<TPage>(site!, {
-        ...request,
-        params: { ...request.params, ...options.pageParams(pageParam as TCursor) },
-      }),
+    queryKey: [...buildQueryKey(options.key, scope, request), "infinite"],
+    // `signal` is read only when abortable: reading it is what opts a query into cancellation.
+    queryFn: context =>
+      fetchAnalytics<TPage>(
+        site!,
+        { ...request, params: { ...request.params, ...options.pageParams(context.pageParam as TCursor) } },
+        options.abortable ? context.signal : undefined
+      ),
     initialPageParam: options.initialPageParam,
     getNextPageParam: options.getNextPageParam,
     staleTime: options.staleTime ?? 60_000,
     refetchInterval: options.refetchInterval,
     refetchOnWindowFocus: options.refetchOnWindowFocus,
-    enabled: (options.enabled ?? true) && !!site,
+    enabled: (options.enabled ?? true) && hasScope && hasPeriod,
   });
 }
 

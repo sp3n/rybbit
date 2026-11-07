@@ -19,9 +19,15 @@ const withNextIntl = createNextIntlPlugin({
 
 const withMDX = createMDX();
 
+// Vercel packages monorepo builds relative to its supplied tracing root.
+// Keep local builds rooted in docs when that override is absent.
+const tracingRoot = process.env.NEXT_PRIVATE_OUTPUT_TRACE_ROOT || import.meta.dirname;
+
 /** @type {import('next').NextConfig} */
 const config = {
   reactStrictMode: true,
+  outputFileTracingRoot: tracingRoot,
+  turbopack: { root: tracingRoot },
   images: {
     remotePatterns: [
       {
@@ -63,11 +69,41 @@ const config = {
       ...['mastodon', 'medium'].map(p => `${p}-bio-generator`),
       ...['nostr', 'lemmy', 'warpcast', 'dribbble', 'mastodon', 'medium', 'vk', 'tumblr'].map(p => `${p}-photo-resizer`),
     ];
-    return retiredSlugs.map(slug => ({
-      source: `/tools/${slug}`,
-      destination: '/tools',
-      permanent: true,
-    }));
+    // URLs that no longer exist but are still linked from old blog posts, external
+    // sites and the search index. Specific rules must precede the catch-alls.
+    const legacyRedirects = [
+      // Docs reorganisation: behavior-analytics/* and product-analytics/* moved.
+      ['/docs/behavior-analytics/:path*', '/docs/feature-guides/:path*'],
+      ['/docs/product-analytics/funnels_guide', '/docs/funnels'],
+      ['/docs/product-analytics/journeys_dashboard', '/docs/feature-guides/journeys'],
+      ['/docs/product-analytics/retention_guide', '/docs/feature-guides/retention'],
+      ['/docs/product-analytics/:path*', '/docs'],
+      ['/docs/web-analytics/goals-tab', '/docs/goals'],
+      ['/docs/web-analytics/:path*', '/docs/feature-guides/main-tab'],
+      ['/docs/getting-started/:path*', '/docs'],
+      ['/docs/blog/:path*', '/blog/:path*'],
+      // Blog posts deleted before redirects existed; they still get visits and backlinks.
+      ['/blog/data-privacy-2025', '/security'],
+      ['/blog/master-digital-marketing', '/blog'],
+      ['/blog/boost-growth-with-key-user-retention-metrics', '/features/retention'],
+      ['/blog/replay-session', '/features/session-replay'],
+      ['/blog/real-time-reports', '/features/web-analytics'],
+      ['/blog/cross-site-tracking', '/features/web-analytics'],
+      ['/blog/user-flow-examples-2025', '/features/user-journeys'],
+      // 2026-09 blog cleanup: two posts merged into keyword-targeted guides, two removed.
+      ['/blog/churn-rate-vs-retention-rate', '/blog/retention-analysis'],
+      ['/blog/what-is-sales-funnel-rybbit', '/blog/funnel-analysis'],
+      ['/blog/content-marketing-funnel', '/blog/funnel-analysis'],
+      ['/blog/onyx-ai-knowledge-platform', '/blog'],
+    ];
+    return [
+      ...retiredSlugs.map(slug => ({
+        source: `/tools/${slug}`,
+        destination: '/tools',
+        permanent: true,
+      })),
+      ...legacyRedirects.map(([source, destination]) => ({ source, destination, permanent: true })),
+    ];
   },
   async rewrites() {
     return [

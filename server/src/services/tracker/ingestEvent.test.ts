@@ -9,13 +9,14 @@ const mocks = vi.hoisted(() => ({
   checkBotBlocking: vi.fn(),
   decideSiteExclusion: vi.fn(),
   isSiteOverLimit: vi.fn(),
+  isSiteWithoutPlan: vi.fn(),
   updateSession: vi.fn(),
   generateUserId: vi.fn(),
   generateUserIdFromClientId: vi.fn(),
 }));
 
 vi.mock("../usageService.js", () => ({
-  usageService: { isSiteOverLimit: mocks.isSiteOverLimit },
+  usageService: { isSiteOverLimit: mocks.isSiteOverLimit, isSiteWithoutPlan: mocks.isSiteWithoutPlan },
 }));
 
 vi.mock("./pageviewQueue.js", () => ({
@@ -92,6 +93,7 @@ describe("ingestEvent", () => {
     vi.clearAllMocks();
     mocks.decideSiteExclusion.mockResolvedValue({ excluded: false });
     mocks.isSiteOverLimit.mockReturnValue(false);
+    mocks.isSiteWithoutPlan.mockReturnValue(false);
     mocks.checkBotBlocking.mockResolvedValue(null);
     mocks.updateSession.mockResolvedValue({ sessionId: "session-alice" });
     mocks.generateUserId.mockResolvedValue("shared-fingerprint");
@@ -175,6 +177,23 @@ describe("ingestEvent", () => {
     });
   });
 
+  it("matches exclusions against the whole URL, and stores it cut to the column limits", async () => {
+    // A query string cut first would lose `preview` and slip past its exclusion.
+    const querystring = `?padding=${"x".repeat(2050)}&preview=1`;
+    const pathname = `/${"p".repeat(3000)}`;
+
+    await ingestEvent(
+      trackingRequest({
+        payload: { type: "pageview", site_id: "site_abc", pathname, querystring } as TrackingRequest["payload"],
+      })
+    );
+
+    expect(mocks.decideSiteExclusion).toHaveBeenCalledWith(site, expect.objectContaining({ pathname, querystring }));
+    expect(mocks.addPageview).toHaveBeenCalledWith(
+      expect.objectContaining({ pathname: pathname.slice(0, 2048), querystring: querystring.slice(0, 2048) })
+    );
+  });
+
   // The ordering fix: exclusion used to run *after* bot detection, so a Site
   // owner's own excluded office IP still drove every anomaly counter.
   it("decides exclusion before bot detection, so excluded traffic leaves no trace", async () => {
@@ -205,6 +224,17 @@ describe("ingestEvent", () => {
 
     expect(outcome).toEqual({ status: "over_limit" });
     expect(mocks.checkBotBlocking).not.toHaveBeenCalled();
+    expect(mocks.addPageview).not.toHaveBeenCalled();
+  });
+
+  it("drops every event for a site whose organization has no plan", async () => {
+    mocks.isSiteWithoutPlan.mockReturnValue(true);
+
+    const outcome = await ingestEvent(trackingRequest());
+
+    expect(outcome).toEqual({ status: "no_plan" });
+    expect(mocks.checkBotBlocking).not.toHaveBeenCalled();
+    expect(mocks.generateUserId).not.toHaveBeenCalled();
     expect(mocks.addPageview).not.toHaveBeenCalled();
   });
 

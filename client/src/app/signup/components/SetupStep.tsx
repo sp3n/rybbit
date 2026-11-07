@@ -12,7 +12,6 @@ interface SetupStepProps {
   domain: string;
   setDomain: (v: string) => void;
   orgName: string;
-  orgSlug: string;
   handleOrgNameChange: (v: string) => void;
   referralSource: string;
   setReferralSource: (v: string) => void;
@@ -24,7 +23,6 @@ export function SetupStep({
   domain,
   setDomain,
   orgName,
-  orgSlug,
   handleOrgNameChange,
   referralSource,
   setReferralSource,
@@ -32,11 +30,19 @@ export function SetupStep({
   onSubmit,
 }: SetupStepProps) {
   const t = useExtracted();
+  const canSubmit = !!orgName && !!domain && isValidDomain(domain) && !(IS_CLOUD && !referralSource);
 
   return (
     <div>
       <h2 className="text-2xl font-semibold mb-4">{t("Set up your workspace")}</h2>
-      <div className="space-y-4">
+      {/* A real form, so Enter submits like the account step. */}
+      <form
+        className="space-y-4"
+        onSubmit={e => {
+          e.preventDefault();
+          if (canSubmit && !isLoading) onSubmit();
+        }}
+      >
         <div className="space-y-2">
           <Label htmlFor="domain">{t("Website Domain")}</Label>
           <Input
@@ -48,9 +54,7 @@ export function SetupStep({
             required
             className="h-10 transition-all bg-neutral-100 dark:bg-neutral-800/50 border-neutral-200 dark:border-neutral-700"
           />
-          <p className="text-xs text-muted-foreground">
-            {t("Enter the domain of the website you want to track")}
-          </p>
+          <p className="text-xs text-muted-foreground">{t("Enter the domain of the website you want to track")}</p>
         </div>
 
         <div className="space-y-2">
@@ -93,22 +97,16 @@ export function SetupStep({
         )}
 
         <Button
+          type="submit"
           className="w-full transition-all duration-300 h-11 bg-emerald-600 hover:bg-emerald-500 text-white"
-          onClick={onSubmit}
-          disabled={
-            isLoading ||
-            !orgName ||
-            !orgSlug ||
-            !domain ||
-            !isValidDomain(domain) ||
-            (IS_CLOUD && !referralSource)
-          }
+          loading={isLoading}
+          disabled={!canSubmit}
           variant="success"
         >
           {IS_CLOUD ? t("Start free trial") : t("Continue")}
           <ArrowRight className="ml-2 h-4 w-4" />
         </Button>
-      </div>
+      </form>
     </div>
   );
 }

@@ -24,6 +24,7 @@ import { EventTypeIcon } from "../../../../components/EventIcons";
 import { EventTrackingNotice } from "../../../../components/EventTrackingNotice";
 import { isAutocaptureTargetType, targetTypeToEventType } from "../../../../lib/events";
 import { Funnel } from "./Funnel";
+import { metricsFromAnalysis } from "./funnelMetrics";
 
 const URL_PATTERN = /^(https?:\/\/|www\.|[a-zA-Z0-9-]+\.[a-zA-Z]{2,}\/)/i;
 
@@ -457,17 +458,22 @@ export function FunnelForm({
     newUseProperties[index] = enabled;
     setUseProperties(newUseProperties);
 
-    // Clear property fields if disabling
-    if (!enabled) {
-      const newSteps = [...steps];
+    // Disabling clears the step's filters but keeps the draft rows, so re-enabling shows them again; put
+    // them back on the step too, or the rows on screen would not be the filters that get saved. Rows
+    // without a key are fresh placeholders that never reached the step (see updateFilterRows).
+    const newSteps = [...steps];
+    if (enabled) {
+      const rows = (stepPropertyFilters[index] || []).filter(row => row.key !== "");
+      newSteps[index] = { ...newSteps[index], propertyFilters: rows.length ? rows : undefined };
+    } else {
       newSteps[index] = {
         ...newSteps[index],
         eventPropertyKey: undefined,
         eventPropertyValue: undefined,
         propertyFilters: undefined,
       };
-      setSteps(newSteps);
     }
+    setSteps(newSteps);
   };
 
   // Update a step's property-filter draft rows; syncToStep is false when adding
@@ -495,7 +501,11 @@ export function FunnelForm({
 
   let funnelArea = null;
   if (funnelData && funnelData.length) {
-    funnelArea = <Funnel data={funnelData} isError={isError} error={error} isPending={isPending} steps={steps} />;
+    funnelArea = (
+      <div className="pt-3">
+        <Funnel steps={steps} metrics={metricsFromAnalysis(funnelData)} />
+      </div>
+    );
   } else {
     funnelArea = (
       <div className="flex flex-1 items-center justify-center py-16">

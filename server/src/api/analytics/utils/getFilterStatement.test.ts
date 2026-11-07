@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { getFilterStatement, getSqlParam } from "./getFilterStatement.js";
+import { filterParamError, getFilterStatement, getSqlParam } from "./getFilterStatement.js";
 import { FilterParameter } from "../types.js";
 
 describe("getSqlParam", () => {
@@ -49,13 +49,13 @@ describe("getSqlParam", () => {
 
     it("should handle entry_page", () => {
       expect(getSqlParam("entry_page")).toBe(
-        "(SELECT argMin(pathname, timestamp) FROM events WHERE session_id = events.session_id)"
+        "(SELECT argMinIf(pathname, timestamp_ms, type = 'pageview') FROM events WHERE session_id = events.session_id)"
       );
     });
 
     it("should handle exit_page", () => {
       expect(getSqlParam("exit_page")).toBe(
-        "(SELECT argMax(pathname, timestamp) FROM events WHERE session_id = events.session_id)"
+        "(SELECT argMaxIf(pathname, timestamp_ms, type = 'pageview') FROM events WHERE session_id = events.session_id)"
       );
     });
 
@@ -239,9 +239,7 @@ describe("getFilterStatement", () => {
     it("matches an identified user, or a device only while it is still anonymous", () => {
       const filters = JSON.stringify([{ parameter: "user_id", type: "equals", value: ["user123"] }]);
       const result = getFilterStatement(filters);
-      expect(result).toBe(
-        "AND (identified_user_id = 'user123' OR (user_id = 'user123' AND identified_user_id = ''))"
-      );
+      expect(result).toBe("AND (identified_user_id = 'user123' OR (user_id = 'user123' AND identified_user_id = ''))");
     });
 
     it("negates exactly the equals predicate for not_equals", () => {
@@ -328,7 +326,8 @@ describe("getFilterStatement", () => {
       const filters = JSON.stringify([{ parameter: "entry_page", type: "equals", value: ["/home"] }]);
       const result = getFilterStatement(filters);
       expect(result).toContain("session_id IN");
-      expect(result).toContain("argMin(pathname, timestamp) AS entry_pathname");
+      expect(result).toContain("argMin(pathname, timestamp_ms) AS entry_pathname");
+      expect(result).toContain("type = 'pageview'");
       expect(result).toContain("entry_pathname = '/home'");
     });
 
@@ -352,7 +351,8 @@ describe("getFilterStatement", () => {
       const filters = JSON.stringify([{ parameter: "exit_page", type: "equals", value: ["/checkout"] }]);
       const result = getFilterStatement(filters);
       expect(result).toContain("session_id IN");
-      expect(result).toContain("argMax(pathname, timestamp) AS exit_pathname");
+      expect(result).toContain("argMax(pathname, timestamp_ms) AS exit_pathname");
+      expect(result).toContain("type = 'pageview'");
       expect(result).toContain("exit_pathname = '/checkout'");
     });
 
@@ -454,6 +454,35 @@ describe("getFilterStatement", () => {
       expect(result).toBe("AND (url_parameters['utm_source'] IS NULL OR url_parameters['utm_source'] = '')");
     });
 
+    it.each([
+      ["city", "city"],
+      ["browser_version", "browser_version"],
+      ["operating_system_version", "operating_system_version"],
+    ])("should test the stored %s column, not its never-empty display expression", (parameter, column) => {
+      const isNull = getFilterStatement(JSON.stringify([{ parameter, type: "is_null", value: [] }]));
+      const isNotNull = getFilterStatement(JSON.stringify([{ parameter, type: "is_not_null", value: [] }]));
+      expect(isNull).toBe(`AND (${column} IS NULL OR ${column} = '')`);
+      expect(isNotNull).toBe(`AND (${column} IS NOT NULL AND ${column} != '')`);
+      expect(isNull).not.toContain("concat");
+    });
+
+    it("should treat unknown dimensions as a 0x0 screen", () => {
+      const filters = JSON.stringify([{ parameter: "dimensions", type: "is_null", value: [] }]);
+      expect(getFilterStatement(filters)).toBe("AND (screen_width = 0 AND screen_height = 0)");
+      const notNull = JSON.stringify([{ parameter: "dimensions", type: "is_not_null", value: [] }]);
+      expect(getFilterStatement(notNull)).toBe("AND (screen_width != 0 OR screen_height != 0)");
+    });
+
+    it("should compare unknown coordinates with 0, not ''", () => {
+      // `lat = ''` is CANNOT_PARSE_NUMBER in ClickHouse.
+      expect(getFilterStatement(JSON.stringify([{ parameter: "lat", type: "is_null", value: [] }]))).toBe(
+        "AND lat = 0"
+      );
+      expect(getFilterStatement(JSON.stringify([{ parameter: "lon", type: "is_not_null", value: [] }]))).toBe(
+        "AND lon != 0"
+      );
+    });
+
     it("should handle is_not_null inside a session-level subquery", () => {
       const filters = JSON.stringify([{ parameter: "event_name", type: "is_not_null", value: [] }]);
       const result = getFilterStatement(filters);
@@ -514,11 +543,28 @@ describe("getFilterStatement", () => {
       expect(getFilterStatement(filters)).toBe("AND lat >= 10");
     });
 
-    it("should coerce numeric comparisons on non-numeric parameters", () => {
-      // Pinned behavior: any parameter accepts numeric comparison types; the
-      // value is coerced with Number() and inlined unquoted.
+    it("should reject numeric comparisons on non-numeric parameters", () => {
+      // `pathname >= 10` compares a String with a UInt8, which ClickHouse
+      // rejects (NO_COMMON_TYPE) — a 500 instead of a 400.
       const filters = JSON.stringify([{ parameter: "pathname", type: "greater_than_or_equal", value: ["10"] }]);
-      expect(getFilterStatement(filters)).toBe("AND pathname >= 10");
+      expect(() => getFilterStatement(filters)).toThrow(
+        'greater_than_or_equal filters only apply to lat and lon, not "pathname"'
+      );
+    });
+
+    it("should reject numeric comparisons inside session-level subqueries too", () => {
+      const filters = JSON.stringify([{ parameter: "event_name", type: "less_than", value: ["5"] }]);
+      expect(() => getFilterStatement(filters)).toThrow("only apply to lat and lon");
+    });
+
+    it("should reject string operators on numeric parameters", () => {
+      const filters = JSON.stringify([{ parameter: "lat", type: "contains", value: ["40"] }]);
+      expect(() => getFilterStatement(filters)).toThrow('contains filters do not apply to the numeric parameter "lat"');
+    });
+
+    it("should reject non-numeric values for lat/lon equality", () => {
+      const filters = JSON.stringify([{ parameter: "lon", type: "equals", value: ["east"] }]);
+      expect(() => getFilterStatement(filters)).toThrow("Invalid numeric value for equals filter: east");
     });
 
     it("should throw for non-numeric value with greater_than_or_equal", () => {
@@ -575,20 +621,26 @@ describe("getFilterStatement", () => {
     });
 
     it("should handle negated filters inside the session subquery", () => {
-      // Note the semantics: this selects sessions containing at least one event
-      // whose hostname differs, not sessions with no matching event.
       const filters = JSON.stringify([{ parameter: "hostname", type: "not_equals", value: ["bad.example.com"] }]);
       const result = getFilterStatement(filters, undefined, undefined, { sessionLevelParams: ["hostname"] });
       expect(normalize(result)).toBe(
-        "AND session_id IN ( SELECT DISTINCT session_id FROM events WHERE hostname != 'bad.example.com' )"
+        "AND session_id NOT IN ( SELECT DISTINCT session_id FROM events WHERE hostname = 'bad.example.com' )"
       );
     });
 
-    it("should AND-join multi-value not_contains inside the session subquery", () => {
+    it("excludes sessions containing any negatively filtered value", () => {
       const filters = JSON.stringify([{ parameter: "pathname", type: "not_contains", value: ["/admin", "/debug"] }]);
       const result = getFilterStatement(filters, undefined, undefined, { sessionLevelParams: ["pathname"] });
       expect(normalize(result)).toBe(
-        "AND session_id IN ( SELECT DISTINCT session_id FROM events WHERE (pathname NOT LIKE '%/admin%' AND pathname NOT LIKE '%/debug%') )"
+        "AND session_id NOT IN ( SELECT DISTINCT session_id FROM events WHERE (pathname LIKE '%/admin%' OR pathname LIKE '%/debug%') )"
+      );
+    });
+
+    it("treats is_null as no non-empty value anywhere in the session", () => {
+      const filters = JSON.stringify([{ parameter: "event_name", type: "is_null", value: [] }]);
+      const result = getFilterStatement(filters, undefined, undefined, { sessionLevelParams: ["event_name"] });
+      expect(normalize(result)).toBe(
+        "AND session_id NOT IN ( SELECT DISTINCT session_id FROM events WHERE (event_name IS NOT NULL AND event_name != '') )"
       );
     });
 
@@ -670,5 +722,34 @@ describe("getFilterStatement", () => {
       });
       expect(result).toBe("AND page_title = 'url_parameters[\\'utm_source\\']'");
     });
+  });
+});
+
+describe("filterParamError", () => {
+  it("accepts absent and valid filters", () => {
+    expect(filterParamError(undefined)).toBeNull();
+    expect(filterParamError("")).toBeNull();
+    expect(filterParamError(JSON.stringify([{ parameter: "pathname", type: "equals", value: ["/"] }]))).toBeNull();
+  });
+
+  it("explains malformed JSON, unknown parameters, bad regexes and non-numeric comparisons", () => {
+    expect(filterParamError("not json")).toBe("Invalid JSON format");
+    expect(filterParamError(JSON.stringify([{ parameter: "nope", type: "equals", value: ["x"] }]))).toMatch(
+      /0\.parameter/
+    );
+    expect(
+      filterParamError(JSON.stringify([{ parameter: "pathname", type: "regex", value: ["[invalid"] }]))
+    ).toBeTruthy();
+    expect(filterParamError(JSON.stringify([{ parameter: "lat", type: "greater_than", value: ["abc"] }]))).toMatch(
+      /Invalid numeric value/
+    );
+    expect(filterParamError(JSON.stringify([{ parameter: "browser", type: "greater_than", value: ["5"] }]))).toBe(
+      'greater_than filters only apply to lat and lon, not "browser"'
+    );
+    expect(filterParamError(["array"])).toBe("filters must be a JSON array");
+    expect(filterParamError(JSON.stringify([{ parameter: "pathname", type: "equals", value: [] }]))).toMatch(
+      /needs at least one value/
+    );
+    expect(filterParamError(JSON.stringify([{ parameter: "pathname", type: "is_null", value: [] }]))).toBeNull();
   });
 });

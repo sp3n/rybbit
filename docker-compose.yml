@@ -22,7 +22,7 @@ services:
 
   clickhouse:
     container_name: clickhouse
-    image: clickhouse/clickhouse-server:26.3.17.4
+    image: clickhouse/clickhouse-server:26.3.62.3
     volumes:
       - clickhouse-data:/var/lib/clickhouse
     configs:
@@ -39,6 +39,9 @@ services:
       - CLICKHOUSE_DB=${CLICKHOUSE_DB:-analytics}
       - CLICKHOUSE_USER=${CLICKHOUSE_USER:-default}
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-frog}
+      # Lets the backend provision the least-privilege `rybbit_query` user
+      # (custom SQL queries / dashboards) with SQL at startup.
+      - CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8123/ping"]
       interval: 3s
@@ -113,6 +116,7 @@ services:
       - CLICKHOUSE_HOST=http://clickhouse:8123
       - CLICKHOUSE_DB=${CLICKHOUSE_DB:-analytics}
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-frog}
+      - CLICKHOUSE_QUERY_PASSWORD=${CLICKHOUSE_QUERY_PASSWORD:-${CLICKHOUSE_PASSWORD:-frog}}
       - POSTGRES_HOST=postgres
       - POSTGRES_PORT=5432
       - POSTGRES_DB=${POSTGRES_DB:-analytics}
@@ -129,6 +133,7 @@ services:
       - CLUSTER_WORKERS=${CLUSTER_WORKERS:-4}
       - DEPLOYMENT=${DEPLOYMENT}
       - LITE_DASHBOARD=${LITE_DASHBOARD}
+      - DASHBOARD_CACHE_TTL_SECONDS=${DASHBOARD_CACHE_TTL_SECONDS:-30}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
       - OPENROUTER_MODEL=${OPENROUTER_MODEL}
     depends_on:
@@ -145,6 +150,11 @@ services:
       retries: 5
       start_period: 10s
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "5"
 
   client:
     image: ghcr.io/rybbit-io/rybbit-client:${IMAGE_TAG:-latest}
@@ -155,6 +165,7 @@ services:
       args:
         NEXT_PUBLIC_BACKEND_URL: ${BASE_URL}
         NEXT_PUBLIC_DISABLE_SIGNUP: ${DISABLE_SIGNUP}
+        NEXT_PUBLIC_DEPLOYMENT: ${DEPLOYMENT}
         NEXT_PUBLIC_LITE_DASHBOARD: ${LITE_DASHBOARD}
         NEXT_PUBLIC_DEPLOYMENT: ${DEPLOYMENT}
     ports:
@@ -168,6 +179,11 @@ services:
     depends_on:
       - backend
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "5"
 
 volumes:
   clickhouse-data:

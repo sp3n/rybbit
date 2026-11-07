@@ -32,6 +32,13 @@ describe("buildMetricQuery", () => {
       expect(sql).toContain("LIMIT 100");
     });
 
+    it("sums each attributed session's pageviews instead of counting sessions", () => {
+      const sql = buildMetricQuery(baseQuery({ parameter: "country" }), SITE_ID);
+      expect(sql).toContain("sum(pageviews_in_session) as pageviews");
+      expect(sql).toContain("sum(sum(pageviews_in_session)) OVER ()");
+      expect(sql).not.toMatch(/COUNT\(\) as pageviews\b/);
+    });
+
     it("uses the session-channel aggregation for channel", () => {
       const sql = buildMetricQuery(baseQuery({ parameter: "channel" }), SITE_ID);
       expect(sql).toContain(`${SESSION_CHANNEL_AGG} as value`);
@@ -57,6 +64,19 @@ describe("buildMetricQuery", () => {
       const sql = buildMetricQuery(baseQuery({ parameter: "event_name" }), SITE_ID, true);
       expect(sql).toContain("COUNT(DISTINCT event_name) as totalCount");
     });
+
+    it("keeps event names row-scoped inside a session-qualified campaign", () => {
+      const filters = JSON.stringify([
+        { parameter: "utm_campaign", type: "equals", value: ["launch"] },
+        { parameter: "event_name", type: "equals", value: ["signup"] },
+      ]);
+      const sql = buildMetricQuery(baseQuery({ parameter: "event_name", filters }), SITE_ID);
+
+      expect(sql).toContain("FilteredSessions AS (");
+      expect(sql).toContain("INNER JOIN FilteredSessions USING (session_id)");
+      expect(sql).toContain("AND event_name = 'signup'");
+      expect(sql.slice(sql.lastIndexOf("FROM events"))).not.toContain("url_parameters['utm_campaign']");
+    });
   });
 
   describe("page_title", () => {
@@ -76,13 +96,15 @@ describe("buildMetricQuery", () => {
   describe("entry_page / exit_page", () => {
     it("orders sessions ascending for entry pages", () => {
       const sql = buildMetricQuery(baseQuery({ parameter: "entry_page" }), SITE_ID);
-      expect(sql).toContain("ORDER BY timestamp ASC) as row_num");
+      expect(sql).toContain("e.timestamp_ms AS timestamp_ms");
+      expect(sql).toContain("timestamp_ms AS timestamp");
+      expect(sql).toContain("ORDER BY timestamp_ms ASC) as row_num");
       expect(sql).toContain("WHERE row_num = 1");
     });
 
     it("orders sessions descending for exit pages", () => {
       const sql = buildMetricQuery(baseQuery({ parameter: "exit_page" }), SITE_ID);
-      expect(sql).toContain("ORDER BY timestamp DESC) as row_num");
+      expect(sql).toContain("ORDER BY timestamp_ms DESC) as row_num");
     });
 
     it("caps time-on-page at 30 minutes", () => {
@@ -96,6 +118,15 @@ describe("buildMetricQuery", () => {
       const sql = buildMetricQuery(baseQuery({ parameter: "pathname" }), SITE_ID);
       expect(sql).toContain("anyHeavy(hostname) as top_hostname");
       expect(sql).toContain("GROUP BY pathname");
+    });
+
+    it("builds paths from all pageviews in campaign-qualified sessions", () => {
+      const filters = JSON.stringify([{ parameter: "utm_campaign", type: "equals", value: ["launch"] }]);
+      const sql = buildMetricQuery(baseQuery({ parameter: "pathname", filters }), SITE_ID);
+
+      expect(sql).toContain("FilteredSessions AS (");
+      expect(sql).toContain("INNER JOIN FilteredSessions fs ON e.session_id = fs.session_id");
+      expect(sql.slice(sql.indexOf("EventTimes AS (")).lastIndexOf("url_parameters['utm_campaign']")).toBe(-1);
     });
   });
 

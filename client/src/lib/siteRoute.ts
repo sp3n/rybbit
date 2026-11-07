@@ -12,12 +12,25 @@ export const SYNCED_ANALYTICS_ROUTES = new Set([
   "journeys",
   "levels",
   "releases",
+  "retention",
   "errors",
   "pages",
   "replay",
   "feature-flags",
   "experiments",
+  "bots",
+  "user",
+  "dashboards",
 ]);
+
+/**
+ * Synced routes usually opened from a link without a query string: a profile
+ * from a list of users, a dashboard from the dashboards list, the next user in
+ * the stepper. An address with no analytics state keeps the period and filters
+ * the page was opened with instead of resetting them; a refreshed or shared
+ * address restores its own like every other synced route.
+ */
+const CARRY_OVER_ANALYTICS_ROUTES = new Set(["user", "dashboards"]);
 
 export type SiteRouteContext = {
   siteId: string | null;
@@ -39,6 +52,10 @@ export function getSiteRouteContext(pathname: string | null | undefined): SiteRo
 
 export function isSyncedAnalyticsRoute(route: string | null | undefined) {
   return !!route && SYNCED_ANALYTICS_ROUTES.has(route);
+}
+
+export function isCarryOverAnalyticsRoute(route: string | null | undefined) {
+  return !!route && CARRY_OVER_ANALYTICS_ROUTES.has(route);
 }
 
 export function getMainDashboardPath(pathname: string | null | undefined) {

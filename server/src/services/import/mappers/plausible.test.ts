@@ -37,7 +37,7 @@ describe("PlausibleImportMapper", () => {
       expect(result).toHaveLength(1);
       expect(result[0]).toMatchObject({
         site_id: 1,
-        timestamp: "2024-06-15 14:30:00",
+        timestamp: "2024-06-15T14:30:00.000Z",
         session_id: TEST_SESSION_ID,
         user_id: TEST_USER_ID,
         hostname: "example.com",
@@ -81,6 +81,16 @@ describe("PlausibleImportMapper", () => {
       expect(result[0].props).toEqual({ plan: "pro" });
     });
 
+    it("drops a well-shaped impossible date without losing the rest of the batch", () => {
+      const events = [
+        makeEvent({ timestamp: "2024-06-15 14:30:00" }),
+        makeEvent({ timestamp: "2024-02-31 12:00:00" }),
+        makeEvent({ timestamp: "2024-06-16 09:00:00" }),
+      ];
+      const result = PlausibleImportMapper.transform(events, 1, "import-1");
+      expect(result.map(row => row.timestamp)).toEqual(["2024-06-15T14:30:00.000Z", "2024-06-16T09:00:00.000Z"]);
+    });
+
     it("should skip events with invalid timestamps", () => {
       const events = [makeEvent({ timestamp: "not-a-date" })];
       const result = PlausibleImportMapper.transform(events, 1, "import-1");
@@ -100,6 +110,13 @@ describe("PlausibleImportMapper", () => {
       expect(result[0].props).toEqual({});
     });
 
+    it.each(["[1]", '"x"', "123", "null"])("should drop props that aren't a JSON object (%s)", props => {
+      const result = PlausibleImportMapper.transform([makeEvent({ props })], 1, "import-1");
+
+      expect(result).toHaveLength(1);
+      expect(result[0].props).toEqual({});
+    });
+
     it("should handle invalid JSON in props", () => {
       const events = [makeEvent({ props: "{bad json" })];
       const result = PlausibleImportMapper.transform(events, 1, "import-1");
@@ -115,11 +132,7 @@ describe("PlausibleImportMapper", () => {
       ];
       const result = PlausibleImportMapper.transform(events, 1, "import-1");
       expect(result).toHaveLength(3);
-      expect(result.map((e) => e.pathname)).toEqual([
-        "/page-1",
-        "/page-2",
-        "/page-3",
-      ]);
+      expect(result.map(e => e.pathname)).toEqual(["/page-1", "/page-2", "/page-3"]);
     });
 
     it("should skip events with hostname exceeding max length", () => {
@@ -147,9 +160,7 @@ describe("PlausibleImportMapper", () => {
     });
 
     it("should compute channel from referrer", () => {
-      const events = [
-        makeEvent({ referrer: "https://google.com", querystring: "" }),
-      ];
+      const events = [makeEvent({ referrer: "https://google.com", querystring: "" })];
       const result = PlausibleImportMapper.transform(events, 1, "import-1");
       expect(result).toHaveLength(1);
       // getChannel should classify google.com as organic search

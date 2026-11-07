@@ -12,14 +12,27 @@ import { STANDARD_SITE_LIMIT, STANDARD_TEAM_LIMIT } from "../lib/const";
 import { PricingCard, type PricingCardProps } from "./PricingCard";
 
 // Available event tiers for the slider
-const EVENT_TIERS = [100_000, 250_000, 500_000, 1_000_000, 2_000_000, 5_000_000, 10_000_000, 20_000_000, 30_000_000, 40_000_000, 50_000_000, "Custom"];
+export const EVENT_TIERS = [
+  100_000,
+  250_000,
+  500_000,
+  1_000_000,
+  2_000_000,
+  5_000_000,
+  10_000_000,
+  20_000_000,
+  30_000_000,
+  40_000_000,
+  50_000_000,
+  "Custom",
+];
 
 export const formatter = Intl.NumberFormat("en", {
   notation: "compact",
 }).format;
 
 // Format price with dollar sign for Basic, Standard, and Pro
-function getFormattedPrice(eventLimit: number | string, planType: "standard" | "pro") {
+export function getFormattedPrice(eventLimit: number | string, planType: "standard" | "pro") {
   // Monthly prices
   let monthlyPrice;
   if (typeof eventLimit === "string") return { custom: true }; // Custom pricing
@@ -117,7 +130,7 @@ export function PricingSection({
     t("Unlimited team members"),
     t("Session replays"),
     t("5 year data retention"),
-    t("10x higher API rate limit"),
+    t("5x higher API rate limit"),
     t("Priority support"),
   ];
 
@@ -167,7 +180,7 @@ export function PricingSection({
     title: t("Standard"),
     description: t("What a small business needs to get started"),
     priceDisplay: renderPrice(standardPrices),
-    buttonText: standardPrices.custom ? t("Contact us") : t("Start for $0"),
+    buttonText: standardPrices.custom ? t("Contact us") : t("Start free trial for $0"),
     buttonHref: standardPrices.custom ? "https://www.rybbit.com/contact" : "https://app.rybbit.io/signup",
     features: STANDARD_FEATURES,
     eventLocation: standardPrices.custom ? undefined : "standard",
@@ -177,7 +190,7 @@ export function PricingSection({
     title: t("Pro"),
     description: t("Advanced features for professional teams"),
     priceDisplay: renderPrice(proPrices),
-    buttonText: proPrices.custom ? t("Contact us") : t("Start for $0"),
+    buttonText: proPrices.custom ? t("Contact us") : t("Start free trial for $0"),
     buttonHref: proPrices.custom ? "https://www.rybbit.com/contact" : "https://app.rybbit.io/signup",
     features: PRO_FEATURES,
     eventLocation: proPrices.custom ? undefined : "pro",
@@ -194,8 +207,7 @@ export function PricingSection({
     features: ENTERPRISE_FEATURES,
     // In the 2-column band (700–1100px) Enterprise spans the full row, so the
     // feature list folds into two columns to keep the cell balanced.
-    featuresClassName:
-      "min-[700px]:columns-2 min-[700px]:gap-x-10 min-[1100px]:columns-1 [&>div]:break-inside-avoid",
+    featuresClassName: "min-[700px]:columns-2 min-[700px]:gap-x-10 min-[1100px]:columns-1 [&>div]:break-inside-avoid",
   };
 
   const headlineClasses = "mt-5 max-w-2xl font-semibold tracking-[-0.035em] text-balance";
@@ -252,7 +264,9 @@ export function PricingSection({
           <div className="rounded-md border border-neutral-300 bg-white px-5 py-6 dark:border-neutral-700 dark:bg-neutral-950 sm:px-6">
             <div className="mb-7 flex items-end justify-between gap-5">
               <div>
-                <h3 className="mb-2 text-sm font-medium text-neutral-600 dark:text-neutral-400">{t("Monthly pageviews")}</h3>
+                <h3 className="mb-2 text-sm font-medium text-neutral-600 dark:text-neutral-400">
+                  {t("Monthly pageviews")}
+                </h3>
                 <div className="text-3xl font-semibold tabular-nums tracking-tight md:text-4xl">
                   {typeof eventLimit === "number" ? eventLimit.toLocaleString() : t("Custom")}
                 </div>

@@ -18,6 +18,9 @@ interface AccountStepProps {
   isLoading: boolean;
   onSubmit: () => void;
   setError: (v: string) => void;
+  /** Where OAuth returns to. Defaults to the signup page's next step. */
+  socialCallbackURL?: string;
+  loginHref?: string;
 }
 
 export function AccountStep({
@@ -30,6 +33,8 @@ export function AccountStep({
   isLoading,
   onSubmit,
   setError,
+  socialCallbackURL = "/signup?step=2",
+  loginHref = "/login",
 }: AccountStepProps) {
   const t = useExtracted();
 
@@ -37,48 +42,57 @@ export function AccountStep({
     <div>
       <h2 className="text-2xl font-semibold mb-4">{t("Signup")}</h2>
       <div className="space-y-4">
-        <SocialButtons onError={setError} callbackURL="/signup?step=2" mode="signup" />
-        <AuthInput
-          id="email"
-          label={t("Email")}
-          type="email"
-          placeholder="email@example.com"
-          required
-          value={email}
-          onChange={e => setEmail(e.target.value)}
-        />
-        <AuthInput
-          id="password"
-          label={t("Password")}
-          type="password"
-          placeholder="••••••••"
-          required
-          value={password}
-          onChange={e => setPassword(e.target.value)}
-        />
-        {IS_CLOUD && (
-          <Turnstile
-            onSuccess={token => setTurnstileToken(token)}
-            onError={() => setTurnstileToken("")}
-            onExpire={() => setTurnstileToken("")}
-            className="flex justify-center"
-          />
-        )}
-        <AuthButton
-          isLoading={isLoading}
-          loadingText={t("Creating account...")}
-          onClick={onSubmit}
-          type="button"
-          className="mt-6 transition-all duration-300 h-11"
-          disabled={IS_CLOUD ? !turnstileToken || isLoading : isLoading}
+        <SocialButtons onError={setError} callbackURL={socialCallbackURL} mode="signup" />
+        {/* A real form, so Enter submits and the browser checks required/type/minLength first */}
+        <form
+          onSubmit={e => {
+            e.preventDefault();
+            onSubmit();
+          }}
+          className="space-y-4"
         >
-          {t("Continue")}
-          <ArrowRight className="ml-2 h-4 w-4" />
-        </AuthButton>
+          <AuthInput
+            id="email"
+            label={t("Email")}
+            type="email"
+            autoComplete="email"
+            placeholder="email@example.com"
+            required
+            value={email}
+            onChange={e => setEmail(e.target.value)}
+          />
+          <AuthInput
+            id="password"
+            label={t("Password")}
+            type="password"
+            autoComplete="new-password"
+            placeholder="••••••••"
+            required
+            value={password}
+            onChange={e => setPassword(e.target.value)}
+          />
+          {IS_CLOUD && (
+            <Turnstile
+              onSuccess={token => setTurnstileToken(token)}
+              onError={() => setTurnstileToken("")}
+              onExpire={() => setTurnstileToken("")}
+              className="flex justify-center"
+            />
+          )}
+          <AuthButton
+            isLoading={isLoading}
+            loadingText={t("Creating account...")}
+            className="mt-6 transition-all duration-300 h-11"
+            disabled={IS_CLOUD && !turnstileToken}
+          >
+            {t("Continue")}
+            <ArrowRight className="ml-2 h-4 w-4" />
+          </AuthButton>
+        </form>
         <div className="text-center text-sm">
           {t("Already have an account?")}{" "}
           <Link
-            href="/login"
+            href={loginHref}
             className="underline underline-offset-4 hover:text-emerald-400 transition-colors duration-300"
           >
             {t("Log in")}

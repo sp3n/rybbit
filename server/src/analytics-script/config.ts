@@ -1,5 +1,6 @@
 import { ScriptConfig } from "./types.js";
 import { parseJsonSafely } from "./utils.js";
+import { getTrackedPathname } from "./url.js";
 
 const FEATURE_FLAG_REQUEST_TIMEOUT_MS = 2000;
 
@@ -25,12 +26,15 @@ function createVisitorId(): string {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
 }
 
+// Matches the server's visitor_id limit: a longer stored id would get every event rejected.
+const MAX_VISITOR_ID_LENGTH = 64;
+
 function getOrCreateVisitorId(namespace: string): string {
   const key = `${namespace}-visitor-id`;
 
   try {
     const stored = localStorage.getItem(key);
-    if (stored) return stored;
+    if (stored && stored.length <= MAX_VISITOR_ID_LENGTH) return stored;
 
     const visitorId = createVisitorId();
     localStorage.setItem(key, visitorId);
@@ -48,19 +52,12 @@ function getIdentifiedUserId(namespace: string): string | undefined {
   }
 }
 
-function getEvaluationPathname(url: URL): string {
-  if (url.hash && url.hash.startsWith("#/")) {
-    return url.hash.substring(1);
-  }
-
-  return url.pathname;
-}
-
 async function fetchFeatureFlags(
   analyticsHost: string,
   siteId: string,
   namespace: string,
-  visitorId: string
+  visitorId: string,
+  trackUrlFragments: boolean
 ): Promise<FeatureFlagFetchResult> {
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), FEATURE_FLAG_REQUEST_TIMEOUT_MS);
@@ -78,7 +75,7 @@ async function fetchFeatureFlags(
         anonymousId: visitorId,
         identifiedUserId: getIdentifiedUserId(namespace),
         hostname: url.hostname,
-        pathname: getEvaluationPathname(url),
+        pathname: getTrackedPathname(url, trackUrlFragments),
         querystring: url.search,
         query: Object.fromEntries(url.searchParams.entries()),
         referrer: document.referrer,
@@ -104,6 +101,15 @@ async function fetchFeatureFlags(
   }
 }
 
+function getSiteIdFromSrc(src: string): string | null {
+  try {
+    const url = new URL(src, window.location.href);
+    return url.searchParams.get("siteId") || url.searchParams.get("site-id") || url.searchParams.get("site_id");
+  } catch (e) {
+    return null;
+  }
+}
+
 /**
  * Parse minimal script configuration from the script tag attributes
  * Configuration is intentionally self-contained so the tracking script does
@@ -122,14 +128,20 @@ export async function parseScriptConfig(scriptTag: HTMLScriptElement): Promise<S
     return null;
   }
 
-  const siteId = scriptTag.getAttribute("data-site-id") || scriptTag.getAttribute("site-id");
+  // Prefer the site ID from the script URL (`/script.js?siteId=...`). Script
+  // optimizers such as WP Rocket, Perfmatters, and FlyingPress recreate the
+  // tag from `data-src` and drop every other `data-*` attribute, but they keep
+  // the URL intact. The attributes remain supported for existing installs.
+  const siteId = getSiteIdFromSrc(src) || scriptTag.getAttribute("data-site-id") || scriptTag.getAttribute("site-id");
   if (!siteId) {
-    console.error("Please provide a valid site ID using the data-site-id attribute");
+    console.error("Please provide a valid site ID using the ?siteId= query parameter or the data-site-id attribute");
     return null;
   }
 
   const namespace = scriptTag.getAttribute("data-namespace") || "rybbit";
-  const visitorId = getOrCreateVisitorId(namespace);
+  // In-memory until the site is known to use feature flags, so plain analytics
+  // installs never touch localStorage (which would require consent in the EU).
+  const visitorId = createVisitorId();
 
   // These can be overridden via data attributes for testing/debugging
   const skipPatterns = parseJsonSafely<string[]>(scriptTag.getAttribute("data-skip-patterns"), []);
@@ -196,6 +208,7 @@ export async function parseScriptConfig(scriptTag: HTMLScriptElement): Promise<S
     autoTrackPageview: getBooleanAttribute(scriptTag, "data-track-initial-pageview", true),
     autoTrackSpa: getBooleanAttribute(scriptTag, "data-track-spa-navigation", true),
     trackQuerystring: getBooleanAttribute(scriptTag, "data-track-url-params", true),
+    trackUrlFragments: getBooleanAttribute(scriptTag, "data-track-url-fragments", false),
     trackOutbound: getBooleanAttribute(scriptTag, "data-track-outbound", true),
     enableWebVitals: getBooleanAttribute(scriptTag, "data-web-vitals", false),
     trackErrors: getBooleanAttribute(scriptTag, "data-track-errors", false),
@@ -221,7 +234,15 @@ export async function parseScriptConfig(scriptTag: HTMLScriptElement): Promise<S
   };
 
   if (resolvedConfig.featureFlagsEnabled) {
-    const result = await fetchFeatureFlags(analyticsHost, siteId, namespace, visitorId);
+    // Percentage rollouts bucket on this ID, so persist it across page loads.
+    resolvedConfig.visitorId = getOrCreateVisitorId(namespace);
+    const result = await fetchFeatureFlags(
+      analyticsHost,
+      siteId,
+      namespace,
+      resolvedConfig.visitorId,
+      resolvedConfig.trackUrlFragments
+    );
     resolvedConfig.featureFlagsEnabled = result.enabled;
     resolvedConfig.featureFlags = result.flags;
   }

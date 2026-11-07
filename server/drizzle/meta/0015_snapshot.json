@@ -1,5 +1,5 @@
 {
-  "id": "18ad7653-bdf3-473a-b4b7-bcabd52d0118",
+  "id": "dceb98ae-704d-44a6-b038-41469969e981",
   "prevId": "f1e9d929-9eb0-4d14-9a41-037b634844fe",
   "version": "7",
   "dialect": "postgresql",
@@ -1268,6 +1268,73 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
+    "public.lifecycle_email_log": {
+      "name": "lifecycle_email_log",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "serial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "email_key": {
+          "name": "email_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "site_id": {
+          "name": "site_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "sent_at": {
+          "name": "sent_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "lifecycle_email_log_user_id_user_id_fk": {
+          "name": "lifecycle_email_log_user_id_user_id_fk",
+          "tableFrom": "lifecycle_email_log",
+          "tableTo": "user",
+          "columnsFrom": [
+            "user_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "lifecycle_email_log_user_email_key_unique": {
+          "name": "lifecycle_email_log_user_email_key_unique",
+          "nullsNotDistinct": false,
+          "columns": [
+            "user_id",
+            "email_key"
+          ]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
     "public.member": {
       "name": "member",
       "schema": "",
@@ -2209,6 +2276,12 @@
           "primaryKey": false,
           "notNull": false,
           "default": "'[]'::jsonb"
+        },
+        "detected_platform": {
+          "name": "detected_platform",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {},
@@ -2246,7 +2319,7 @@
       "checkConstraints": {
         "sites_type_check": {
           "name": "sites_type_check",
-          "value": "\"sites\".\"type\" IS NULL OR \"sites\".\"type\" IN ('web', 'mobile', 'game')"
+          "value": "\"sites\".\"type\" IS NULL OR \"sites\".\"type\" IN ('web', 'mobile')"
         }
       },
       "isRLSEnabled": false

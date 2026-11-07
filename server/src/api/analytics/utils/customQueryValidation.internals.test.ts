@@ -3,7 +3,7 @@ import {
   collectInTableReferences,
   collectTableReferences,
   getCteNames,
-  hasQuotedIdentifierSyntax,
+  hasUnsupportedSyntax,
   normalizeCustomQuery,
   stripSqlLiteralsAndComments,
 } from "./customQueryValidation.js";
@@ -74,12 +74,9 @@ describe("stripSqlLiteralsAndComments", () => {
       expect(stripSqlLiteralsAndComments("SELECT 1 /* FROM secret")).toBe("SELECT 1               ");
     });
 
-    it("does not treat nested /* as re-opening — first */ ends the comment", () => {
-      // The comment ends at the first */; the trailing "*/" becomes live SQL.
-      const out = stripSqlLiteralsAndComments("SELECT 1 /* a /* b */ x */ FROM t");
-      expect(out).toHaveLength("SELECT 1 /* a /* b */ x */ FROM t".length);
-      // The "x */" after the first close is NOT stripped.
-      expect(out).toContain("x */ FROM t");
+    it("nests block comments like ClickHouse — the matching */ ends the comment", () => {
+      const input = "SELECT 1 /* a /* b */ x */ FROM t";
+      expect(stripSqlLiteralsAndComments(input)).toBe("SELECT 1                   FROM t");
     });
   });
 
@@ -221,36 +218,64 @@ describe("collectInTableReferences", () => {
 });
 
 // =============================================================================
-// hasQuotedIdentifierSyntax
+// hasUnsupportedSyntax
 // =============================================================================
 
-describe("hasQuotedIdentifierSyntax", () => {
+describe("collectTableReferences — qualified names", () => {
+  it("reads a database-qualified name as one reference even with whitespace around the dot", () => {
+    expect(collectTableReferences("SELECT 1 FROM db . tbl")).toEqual(["db.tbl"]);
+    expect(collectTableReferences("SELECT 1 FROM db .tbl JOIN db. tbl2 ON 1")).toEqual(["db.tbl", "db."]);
+    expect(collectInTableReferences("SELECT 1 WHERE x IN db . tbl")).toEqual(["db.tbl"]);
+  });
+});
+
+describe("hasUnsupportedSyntax", () => {
   it("detects a double-quoted identifier", () => {
-    expect(hasQuotedIdentifierSyntax('SELECT "x" FROM t')).toBe(true);
+    expect(hasUnsupportedSyntax('SELECT "x" FROM t')).toBe(true);
   });
 
   it("detects a backtick-quoted identifier", () => {
-    expect(hasQuotedIdentifierSyntax("SELECT `x` FROM t")).toBe(true);
+    expect(hasUnsupportedSyntax("SELECT `x` FROM t")).toBe(true);
   });
 
   it("does NOT flag a double quote or backtick that lives inside a string literal", () => {
-    expect(hasQuotedIdentifierSyntax("SELECT 'has \" quote'")).toBe(false);
-    expect(hasQuotedIdentifierSyntax("SELECT 'has ` tick'")).toBe(false);
+    expect(hasUnsupportedSyntax("SELECT 'has \" quote'")).toBe(false);
+    expect(hasUnsupportedSyntax("SELECT 'has ` tick'")).toBe(false);
   });
 
   it("does NOT flag a double quote inside a line or block comment", () => {
-    expect(hasQuotedIdentifierSyntax("SELECT 1 -- a \" b\nFROM t")).toBe(false);
-    expect(hasQuotedIdentifierSyntax('SELECT 1 /* a " b */ FROM t')).toBe(false);
+    expect(hasUnsupportedSyntax("SELECT 1 -- a \" b\nFROM t")).toBe(false);
+    expect(hasUnsupportedSyntax('SELECT 1 /* a " b */ FROM t')).toBe(false);
   });
 
   it("respects doubled-quote and backslash escapes when tracking string state", () => {
     // The '' keeps us inside the string, so the later " is still inside it.
-    expect(hasQuotedIdentifierSyntax(`SELECT 'it''s a \" test'`)).toBe(false);
-    expect(hasQuotedIdentifierSyntax(`SELECT 'a\\' \" b'`)).toBe(false);
+    expect(hasUnsupportedSyntax(`SELECT 'it''s a \" test'`)).toBe(false);
+    expect(hasUnsupportedSyntax(`SELECT 'a\\' \" b'`)).toBe(false);
   });
 
   it("returns false for a clean query with no quoting", () => {
-    expect(hasQuotedIdentifierSyntax("SELECT count(*) FROM scoped_events")).toBe(false);
+    expect(hasUnsupportedSyntax("SELECT count(*) FROM scoped_events")).toBe(false);
+  });
+
+  it("detects a /* opened inside a block comment (ClickHouse nests them)", () => {
+    expect(hasUnsupportedSyntax("SELECT 1 /* a /* b */ c */ FROM t")).toBe(true);
+    expect(hasUnsupportedSyntax("SELECT 1 /* a //* b */ FROM t")).toBe(true);
+  });
+
+  it("does NOT flag sequential or self-closing block comments", () => {
+    expect(hasUnsupportedSyntax("SELECT 1 /* a */ /* b */ /**/ FROM t")).toBe(false);
+    expect(hasUnsupportedSyntax("SELECT 1 /* a */* 2 FROM t")).toBe(false);
+  });
+
+  it("detects non-ASCII characters outside literals and comments", () => {
+    expect(hasUnsupportedSyntax("SELECT \u2018x\u2019 FROM t")).toBe(true);
+    expect(hasUnsupportedSyntax("SELECT \u201cx\u201d FROM t")).toBe(true);
+    expect(hasUnsupportedSyntax("SELECT 1 FROM\u00a0t")).toBe(true);
+  });
+
+  it("does NOT flag non-ASCII text inside a string literal or comment", () => {
+    expect(hasUnsupportedSyntax("SELECT '/\u00fcber \u2018x\u2019' -- \u00e9\nFROM t /* \u201c */")).toBe(false);
   });
 });
 

@@ -29,7 +29,9 @@ export async function trackEvent(request: FastifyRequest, reply: FastifyReply) {
     const trackingRequest = await resolveTrackingRequest(request, validationResult.data);
 
     if (!trackingRequest) {
-      logger.warn({ siteId: validationResult.data.site_id }, "Site not found");
+      // The 404 lifecycle line already logs at warn; deleted sites that still embed
+      // the script would otherwise log a second warn on every event.
+      logger.debug({ siteId: validationResult.data.site_id }, "Site not found");
       return reply.status(404).send({
         success: false,
         error: "Site not found",
@@ -40,6 +42,10 @@ export async function trackEvent(request: FastifyRequest, reply: FastifyReply) {
 
     if (outcome.status === "over_limit") {
       return reply.status(200).send("Site over monthly limit, event not tracked");
+    }
+
+    if (outcome.status === "no_plan") {
+      return reply.status(200).send("Site has no plan, event not tracked");
     }
 
     if (outcome.status === "excluded") {

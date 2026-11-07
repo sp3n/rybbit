@@ -12,6 +12,10 @@ const mocks = vi.hoisted(() => ({
   getConfig: vi.fn(async () => ({ siteId: 1 })),
 }));
 
+vi.mock("../../services/usageService.js", () => ({
+  usageService: { requestOrganizationRefresh: vi.fn() },
+}));
+
 vi.mock("../../db/postgres/postgres.js", () => ({
   db: {
     query: {
@@ -95,7 +99,7 @@ beforeEach(() => {
   mocks.getSubscriptionInner.mockResolvedValue(subscription(false));
 });
 
-describe("updateSiteConfig — session replay pro gating (the only subscription-gated field)", () => {
+describe("updateSiteConfig — session replay pro gating", () => {
   it("rejects enabling session replay on a non-pro plan and writes nothing", async () => {
     mocks.getSubscriptionInner.mockResolvedValue(subscription(false));
     const reply = replyStub();
@@ -192,8 +196,7 @@ describe("updateSiteConfig — non-gated fields update without subscription chec
         name: "Renamed",
         public: true,
         blockBots: false,
-        webVitals: true,
-        trackErrors: true,
+        trackUrlFragments: true,
         excludedCountries: ["US", "GB"],
         tags: ["prod"],
       }),
@@ -206,12 +209,22 @@ describe("updateSiteConfig — non-gated fields update without subscription chec
       name: "Renamed",
       public: true,
       blockBots: false,
-      webVitals: true,
-      trackErrors: true,
+      trackUrlFragments: true,
       excludedCountries: ["US", "GB"],
       tags: ["prod"],
     });
     expect(mocks.invalidate).toHaveBeenCalledWith(state.site);
+  });
+
+  it("rejects turning on Standard features without an active subscription", async () => {
+    mocks.getSubscriptionInner.mockResolvedValue({ ...subscription(false), status: "free" });
+    const reply = replyStub();
+
+    await updateSiteConfig(makeRequest({ webVitals: true, trackErrors: true }), reply);
+
+    expect(reply.statusCode).toBe(403);
+    expect(reply.body.error).toContain("require an active subscription");
+    expect(state.updates).toHaveLength(0);
   });
 
   it("cleans and stores an updated domain", async () => {

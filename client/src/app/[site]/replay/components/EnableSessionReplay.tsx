@@ -3,11 +3,13 @@
 import { Video } from "lucide-react";
 import { useExtracted } from "next-intl";
 import { useParams } from "next/navigation";
+import { useState } from "react";
 import { toast } from "@/components/ui/sonner";
 import { updateSiteConfig } from "../../../../api/admin/endpoints";
 import { useGetSite } from "../../../../api/admin/hooks/useSites";
 import { Alert, AlertDescription, AlertTitle } from "../../../../components/ui/alert";
 import { Button } from "../../../../components/ui/button";
+import { useCanOnSite } from "../../../../hooks/usePermissions";
 import { planIncludesReplay } from "../../../../lib/subscription/planUtils";
 import { useStripeSubscription } from "../../../../lib/subscription/useStripeSubscription";
 import { IS_CLOUD } from "../../../../lib/const";
@@ -18,15 +20,32 @@ export function EnableSessionReplay() {
   const siteId = Number(params.site);
   const { data: siteMetadata, isLoading, refetch } = useGetSite(siteId);
   const { data: subscription } = useStripeSubscription();
+  const [isEnabling, setIsEnabling] = useState(false);
+  const canConfigure = useCanOnSite("sites:configure", siteId);
 
   const canEnableReplay = !IS_CLOUD || planIncludesReplay(subscription);
 
   if (isLoading || siteMetadata?.sessionReplay || !canEnableReplay) return null;
 
+  const enable = async () => {
+    setIsEnabling(true);
+    try {
+      await updateSiteConfig(siteId, { sessionReplay: true });
+      // Stay busy until the refetch hides this banner, so "Enable" never flashes back
+      await refetch();
+      toast.success(t("Session replay enabled"));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      toast.error(t("Failed to enable session replay: {message}", { message }));
+    } finally {
+      setIsEnabling(false);
+    }
+  };
+
   return (
-    <Alert className="shrink-0 p-4 bg-neutral-50/50 border-amber-200/50 dark:bg-neutral-800/25 dark:border-amber-600/80">
+    <Alert className="shrink-0 p-4">
       <div className="flex items-start space-x-3">
-        <Video className="h-5 w-5 mt-0.5 text-amber-600 dark:text-neutral-100" />
+        <Video className="h-5 w-5 mt-0.5 text-amber-600 dark:text-amber-400" />
         <div className="flex-1">
           <AlertTitle className="text-base font-semibold mb-1 text-neutral-700/90 dark:text-neutral-100">
             {t("Session Replay is Disabled")}
@@ -37,17 +56,13 @@ export function EnableSessionReplay() {
               {t("and the client will send significantly more and larger payloads.")}{" "}
               <b>{t("Only enable this if you will actually use it.")}</b>
             </div>
-            <Button
-              size="sm"
-              variant="success"
-              onClick={async () => {
-                await updateSiteConfig(siteId, { sessionReplay: true });
-                toast.success(t("Session replay enabled"));
-                refetch();
-              }}
-            >
-              {t("Enable")}
-            </Button>
+            {canConfigure ? (
+              <Button size="sm" variant="success" loading={isEnabling} onClick={enable}>
+                {t("Enable")}
+              </Button>
+            ) : (
+              <p>{t("Ask a site admin to enable it.")}</p>
+            )}
           </AlertDescription>
         </div>
       </div>

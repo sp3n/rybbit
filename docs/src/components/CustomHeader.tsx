@@ -11,6 +11,10 @@ import Image from "next/image";
 import Link from "next/link";
 import { useState } from "react";
 
+/**
+ * Site header. Default register is the marketing pages' instrument sheet
+ * (1200px column with hairline sides, square buttons).
+ */
 export function CustomHeader() {
   const t = useExtracted();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -51,6 +55,15 @@ export function CustomHeader() {
             {t("Login")}
           </AppLink>
           <AppLink
+            href="https://demo.rybbit.com/81"
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={() => trackAdEvent("demo", { location: "header" })}
+            className="hidden h-9 items-center justify-center rounded-full border border-neutral-300 bg-white px-4 text-sm font-medium text-neutral-900 transition-colors hover:bg-neutral-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-500 dark:border-neutral-800 dark:bg-neutral-900 dark:text-white dark:hover:bg-neutral-800"
+          >
+            {t("Live demo")}
+          </AppLink>
+          {/* <AppLink
             href="https://app.rybbit.io/signup"
             target="_blank"
             rel="noopener noreferrer"
@@ -58,18 +71,22 @@ export function CustomHeader() {
             className="inline-flex h-8 items-center justify-center rounded-md bg-emerald-600 px-3 text-sm font-medium text-white transition-colors hover:bg-emerald-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:focus-visible:ring-offset-neutral-950"
           >
             {t("Sign up")}
-          </AppLink>
+          </AppLink> */}
         </div>
 
         <button
           type="button"
           className="inline-flex size-10 items-center justify-center rounded-md text-neutral-600 transition-colors hover:bg-neutral-100 hover:text-neutral-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-500 dark:text-neutral-400 dark:hover:bg-neutral-900 dark:hover:text-white lg:hidden"
-          onClick={() => setMobileMenuOpen((open) => !open)}
+          onClick={() => setMobileMenuOpen(open => !open)}
           aria-expanded={mobileMenuOpen}
           aria-controls="mobile-navigation"
         >
           <span className="sr-only">{mobileMenuOpen ? t("Close main menu") : t("Open main menu")}</span>
-          {mobileMenuOpen ? <X className="size-5" aria-hidden="true" /> : <Menu className="size-5" aria-hidden="true" />}
+          {mobileMenuOpen ? (
+            <X className="size-5" aria-hidden="true" />
+          ) : (
+            <Menu className="size-5" aria-hidden="true" />
+          )}
         </button>
       </nav>
 

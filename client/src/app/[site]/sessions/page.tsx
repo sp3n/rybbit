@@ -1,149 +1,245 @@
 "use client";
 
-import { useExtracted } from "next-intl";
-import { useGetSite } from "@/api/admin/hooks/useSites";
-import { SessionsList } from "@/components/Sessions/SessionsList";
 import { Info } from "lucide-react";
+import { useExtracted } from "next-intl";
 import Link from "next/link";
-import { useState } from "react";
-import { useGetSessions } from "../../../api/analytics/hooks/useGetUserSessions";
-import { DisabledOverlay } from "../../../components/DisabledOverlay";
-import { Input } from "../../../components/ui/input";
-import { Label } from "../../../components/ui/label";
-import { Switch } from "../../../components/ui/switch";
-import { Tooltip, TooltipContent, TooltipTrigger } from "../../../components/ui/tooltip";
-import { useSetPageTitle } from "../../../hooks/useSetPageTitle";
-import { GAME_SESSION_PAGE_FILTERS, SESSION_PAGE_FILTERS } from "../../../lib/filterGroups";
+import { useMemo, useState } from "react";
+import { useGetSite } from "@/api/admin/hooks/useSites";
+import { SessionView } from "@/api/analytics/endpoints";
+import { useGetSessionsSummary } from "@/api/analytics/hooks/useGetSessionsSummary";
+import { useGetSessions } from "@/api/analytics/hooks/useGetUserSessions";
+import { DisabledOverlay } from "@/components/DisabledOverlay";
+import { SessionsList } from "@/components/Sessions/SessionsList";
+import { AnalysisBar } from "@/components/site/AnalysisBar";
+import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { useReplayAvailable } from "@/hooks/useReplayAvailable";
+import { useSetPageTitle } from "@/hooks/useSetPageTitle";
+import { GAME_SESSION_PAGE_FILTERS, SESSION_PAGE_FILTERS } from "@/lib/filterGroups";
+import { useComparisonEnabled, useStore } from "@/lib/store";
 import { SubHeader } from "../components/SubHeader/SubHeader";
+import { RangeChip } from "./components/RangeChip";
+import { PAGE_SIZE_OPTIONS, SessionSortState, SessionsLedger } from "./components/SessionsLedger";
+import { SessionsStatBand } from "./components/SessionsStatBand";
+import { EMPTY_RANGES, hasAnyRange, RangeMetric, RangeValue, SessionRanges, toRangeParams } from "./sessionRanges";
 
-const LIMIT = 100;
+const DEFAULT_SORT: SessionSortState = { by: "started", order: "desc" };
+const GAME_PAGE_SIZE = 100;
 
 export default function SessionsPage() {
-  const t = useExtracted();
   const { data: siteMetadata } = useGetSite();
-  const isGame = siteMetadata?.type === "game";
-  useSetPageTitle(isGame ? "Play Sessions" : "Sessions");
-  const [page, setPage] = useState(1);
-  const [identifiedOnly, setIdentifiedOnly] = useState(false);
-  const [minPageviews, setMinPageviews] = useState<number | undefined>(undefined);
-  const [minEvents, setMinEvents] = useState<number | undefined>(undefined);
-  const [minDuration, setMinDuration] = useState<number | undefined>(undefined);
+  return siteMetadata?.type === "game" ? <GameSessionsPage /> : <WebSessionsPage />;
+}
 
-  const { data, isLoading } = useGetSessions({
-    page: page,
-    limit: LIMIT + 1,
-    identifiedOnly: identifiedOnly,
-    minPageviews: isGame ? undefined : minPageviews,
-    minEvents: isGame ? undefined : minEvents,
-    minGameActions: isGame ? minPageviews : undefined,
-    minDuration,
+function WebSessionsPage() {
+  const t = useExtracted();
+  useSetPageTitle("Sessions");
+
+  const [view, setView] = useState<SessionView>("all");
+  const [sort, setSort] = useState<SessionSortState>(DEFAULT_SORT);
+  const [ranges, setRanges] = useState<SessionRanges>(EMPTY_RANGES);
+  const [pageSize, setPageSize] = useState(PAGE_SIZE_OPTIONS[0]);
+
+  // The page number only means something for one list. Anything that changes
+  // which sessions are listed, or their order, starts again from page 1; the
+  // number is stored with the list it belongs to, so no effect has to reset it.
+  const time = useStore(state => state.time);
+  const filters = useStore(state => state.filters);
+  const segmentId = useStore(state => state.segmentId);
+  const listKey = JSON.stringify([time, filters, segmentId, view, sort, ranges, pageSize]);
+  const [pageState, setPageState] = useState({ listKey, page: 1 });
+  const page = pageState.listKey === listKey ? pageState.page : 1;
+  const setPage = (next: number) => setPageState({ listKey, page: next });
+
+  const setRange = (metric: RangeMetric) => (value: RangeValue) =>
+    setRanges(current => ({ ...current, [metric]: value }));
+  const rangeParams = toRangeParams(ranges);
+
+  const replayAvailable = useReplayAvailable();
+  const comparisonEnabled = useComparisonEnabled();
+
+  const {
+    data: sessions,
+    isLoading,
+    isError,
+    isPlaceholderData,
+  } = useGetSessions({
+    page,
+    limit: pageSize,
+    view: view === "all" ? undefined : view,
+    sortBy: sort.by,
+    sortOrder: sort.order,
+    includeGoals: true,
+    ...rangeParams,
   });
-  const allSessions = data || [];
-  const hasNextPage = allSessions.length > LIMIT;
-  const sessions = allSessions.slice(0, LIMIT);
-  const hasPrevPage = page > 1;
+  const {
+    data: summary,
+    isLoading: isSummaryLoading,
+    isError: isSummaryError,
+    refetch: refetchSummary,
+  } = useGetSessionsSummary(rangeParams);
+  // The band describes the whole period, so its comparison takes no ranges.
+  const { data: previousSummary } = useGetSessionsSummary({ periodTime: "previous" });
 
-  const handleNumberInput = (value: string, setter: (val: number | undefined) => void) => {
-    if (value === "") {
-      setter(undefined);
-    } else {
-      const num = parseInt(value, 10);
-      if (!isNaN(num) && num >= 0) {
-        setter(num);
-      }
-    }
-    setPage(1);
-  };
-
-  const headerElement = (
-    <div className="flex items-center gap-4 flex-wrap">
-      {/* Identified only toggle */}
-      <div className="flex items-center gap-2">
-        <Switch
-          id="identified-only"
-          checked={identifiedOnly}
-          onCheckedChange={val => {
-            setIdentifiedOnly(val);
-            setPage(1);
-          }}
-        />
-        <Label htmlFor="identified-only" className="text-sm text-neutral-600 dark:text-neutral-400 cursor-pointer">
-          {isGame ? t("Known players only") : t("Identified only")}
-        </Label>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Link href="https://www.rybbit.io/docs/identify-users" target="_blank">
-              <Info className="h-4 w-4 text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-300 cursor-pointer" />
-            </Link>
-          </TooltipTrigger>
-          <TooltipContent>
-            <p>{isGame ? t("Show sessions linked to a stable player ID") : t("Learn how to identify users")}</p>
-          </TooltipContent>
-        </Tooltip>
-      </div>
-
-      {/* Min filters - hidden on mobile */}
-      <div className="hidden md:flex items-center gap-4">
-        <div className="flex items-center gap-2">
-          <Label htmlFor="min-pageviews" className="text-sm text-neutral-600 dark:text-neutral-400 whitespace-nowrap">
-            {isGame ? t("Min actions") : t("Min pageviews")}
-          </Label>
-          <Input
-            id="min-pageviews"
-            type="number"
-            min={0}
-            placeholder="0"
-            value={minPageviews ?? ""}
-            onChange={e => handleNumberInput(e.target.value, setMinPageviews)}
-            className="w-20 h-8"
-          />
-        </div>
-        {!isGame && (
-          <div className="flex items-center gap-2">
-            <Label htmlFor="min-events" className="text-sm text-neutral-600 dark:text-neutral-400 whitespace-nowrap">
-              {t("Min events")}
-            </Label>
-            <Input
-              id="min-events"
-              type="number"
-              min={0}
-              placeholder="0"
-              value={minEvents ?? ""}
-              onChange={e => handleNumberInput(e.target.value, setMinEvents)}
-              className="w-20 h-8"
-            />
-          </div>
-        )}
-        <div className="flex items-center gap-2">
-          <Label htmlFor="min-duration" className="text-sm text-neutral-600 dark:text-neutral-400 whitespace-nowrap">
-            {t("Min duration (s)")}
-          </Label>
-          <Input
-            id="min-duration"
-            type="number"
-            min={0}
-            placeholder="0"
-            value={minDuration ?? ""}
-            onChange={e => handleNumberInput(e.target.value, setMinDuration)}
-            className="w-20 h-8"
-          />
-        </div>
-      </div>
-    </div>
+  const dayCounts = useMemo(
+    () => new Map((summary?.days ?? []).map(day => [day.day, day[view] ?? 0])),
+    [summary?.days, view]
   );
 
+  const narrowed = hasAnyRange(ranges);
+
   return (
-    <DisabledOverlay message={isGame ? t("Play Sessions") : t("Sessions")} featurePath="sessions">
+    <DisabledOverlay message={t("Sessions")} featurePath="sessions">
       <div className="p-2 md:p-4 max-w-[1300px] mx-auto space-y-3">
-        <SubHeader availableFilters={isGame ? GAME_SESSION_PAGE_FILTERS : SESSION_PAGE_FILTERS} />
+        <SubHeader availableFilters={SESSION_PAGE_FILTERS} />
+        <SessionsStatBand
+          summary={summary}
+          previous={comparisonEnabled ? previousSummary : undefined}
+          isLoading={isSummaryLoading}
+          isError={isSummaryError && !summary}
+          refetch={refetchSummary}
+        />
+        <AnalysisBar
+          end={
+            narrowed && summary ? (
+              <span className="whitespace-nowrap text-xs tabular-nums text-neutral-500 dark:text-neutral-400">
+                {t.rich("<b>{matching}</b> of {total} sessions match", {
+                  matching: summary.matching.all.toLocaleString(),
+                  total: summary.sessions.toLocaleString(),
+                  b: chunks => <span className="font-medium text-neutral-900 dark:text-neutral-100">{chunks}</span>,
+                })}
+              </span>
+            ) : null
+          }
+        >
+          <div className="mx-1 hidden h-5 w-px bg-neutral-200 sm:block dark:bg-neutral-800" />
+          <RangeChip
+            label={t("Pageviews")}
+            clearLabel={t("Clear pageviews range")}
+            value={ranges.pageviews}
+            onChange={setRange("pageviews")}
+          />
+          <RangeChip
+            label={t("Events")}
+            clearLabel={t("Clear events range")}
+            value={ranges.events}
+            onChange={setRange("events")}
+          />
+          <RangeChip
+            label={t("Duration")}
+            clearLabel={t("Clear duration range")}
+            value={ranges.duration}
+            onChange={setRange("duration")}
+            duration
+          />
+        </AnalysisBar>
+        <SessionsLedger
+          sessions={sessions ?? []}
+          isLoading={isLoading}
+          isRefreshing={isPlaceholderData}
+          isError={isError}
+          view={view}
+          onViewChange={setView}
+          counts={summary?.matching}
+          dayCounts={dayCounts}
+          showReplay={replayAvailable}
+          narrowed={narrowed}
+          sort={sort}
+          onSortChange={setSort}
+          page={page}
+          pageSize={pageSize}
+          onPageChange={setPage}
+          onPageSizeChange={setPageSize}
+        />
+      </div>
+    </DisabledOverlay>
+  );
+}
+
+/**
+ * Game sites list play sessions as cards (platform, build, gameplay actions,
+ * first/last game event) rather than the web sessions ledger, whose columns,
+ * views and stat band are about pageviews, replays and goals.
+ */
+function GameSessionsPage() {
+  const t = useExtracted();
+  useSetPageTitle("Play Sessions");
+
+  const [knownPlayersOnly, setKnownPlayersOnly] = useState(false);
+  const [actions, setActions] = useState<RangeValue>({});
+  const [duration, setDuration] = useState<RangeValue>({});
+
+  // As on the web list, the page number belongs to the list it was chosen for.
+  const time = useStore(state => state.time);
+  const filters = useStore(state => state.filters);
+  const segmentId = useStore(state => state.segmentId);
+  const listKey = JSON.stringify([time, filters, segmentId, knownPlayersOnly, actions, duration]);
+  const [pageState, setPageState] = useState({ listKey, page: 1 });
+  const page = pageState.listKey === listKey ? pageState.page : 1;
+  const setPage = (next: number) => setPageState({ listKey, page: next });
+
+  const { data, isLoading, isError, refetch } = useGetSessions({
+    page,
+    // One extra row tells whether there is a next page.
+    limit: GAME_PAGE_SIZE + 1,
+    view: knownPlayersOnly ? "identified" : undefined,
+    minGameActions: actions.min,
+    minDuration: duration.min,
+    maxDuration: duration.max,
+  });
+  const allSessions = data || [];
+  const sessions = allSessions.slice(0, GAME_PAGE_SIZE);
+
+  return (
+    <DisabledOverlay message={t("Play Sessions")} featurePath="sessions">
+      <div className="p-2 md:p-4 max-w-[1300px] mx-auto space-y-3">
+        <SubHeader availableFilters={GAME_SESSION_PAGE_FILTERS} />
+        <AnalysisBar>
+          <div className="mx-1 hidden h-5 w-px bg-neutral-200 sm:block dark:bg-neutral-800" />
+          <div className="flex items-center gap-2 px-1">
+            <Switch id="known-players-only" checked={knownPlayersOnly} onCheckedChange={setKnownPlayersOnly} />
+            <Label
+              htmlFor="known-players-only"
+              className="text-sm text-neutral-600 dark:text-neutral-400 cursor-pointer whitespace-nowrap"
+            >
+              {t("Known players only")}
+            </Label>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Link href="https://www.rybbit.io/docs/identify-users" target="_blank">
+                  <Info className="h-4 w-4 text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-300 cursor-pointer" />
+                </Link>
+              </TooltipTrigger>
+              <TooltipContent>
+                <p>{t("Show sessions linked to a stable player ID")}</p>
+              </TooltipContent>
+            </Tooltip>
+          </div>
+          <RangeChip
+            label={t("Actions")}
+            clearLabel={t("Clear actions range")}
+            value={actions}
+            onChange={setActions}
+            minOnly
+          />
+          <RangeChip
+            label={t("Duration")}
+            clearLabel={t("Clear duration range")}
+            value={duration}
+            onChange={setDuration}
+            duration
+          />
+        </AnalysisBar>
         <SessionsList
           sessions={sessions}
           isLoading={isLoading}
+          isError={isError}
+          onRetry={refetch}
           page={page}
           onPageChange={setPage}
-          hasNextPage={hasNextPage}
-          hasPrevPage={hasPrevPage}
-          headerElement={headerElement}
+          hasNextPage={allSessions.length > GAME_PAGE_SIZE}
+          hasPrevPage={page > 1}
         />
       </div>
     </DisabledOverlay>

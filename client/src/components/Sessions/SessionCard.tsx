@@ -8,15 +8,15 @@ import { ArchiveRestore, ArrowRight, ChevronDown, ChevronRight, Video } from "lu
 import { DateTime } from "luxon";
 import { useExtracted } from "next-intl";
 import Link from "next/link";
-import { useParams } from "next/navigation";
 import { memo, useCallback, useState } from "react";
 import { GetSessionsResponse } from "../../api/analytics/endpoints";
+import { useSitePath } from "@/app/[site]/sessions/components/useSitePath";
 import { useDateTimeFormat } from "@/hooks/useDateTimeFormat";
 import { formatShortDuration } from "../../lib/dateTimeUtils";
 import { cn, formatter, getUserDisplayName, truncateString } from "../../lib/utils";
 import { Avatar } from "../Avatar";
 import { Channel } from "../Channel";
-import { EventIcon, PageviewIcon } from "../EventIcons";
+import { EventTypeIcon } from "../EventIcons";
 import { IdentifiedBadge } from "../IdentifiedBadge";
 import {
   BrowserTooltipIcon,
@@ -27,6 +27,7 @@ import {
 import { Badge } from "../ui/badge";
 import { ReplayDrawer } from "./ReplayDrawer";
 import { SessionDetails } from "./SessionDetails";
+import { sessionEventCount } from "./sessionEventCount";
 
 interface SessionCardProps {
   session: GetSessionsResponse[number];
@@ -65,7 +66,7 @@ function GameSessionBadges({ session }: { session: GetSessionsResponse[number] }
       <Tooltip>
         <TooltipTrigger asChild>
           <Badge className="flex items-center gap-1 bg-neutral-100 text-neutral-600 dark:bg-neutral-800 dark:text-neutral-300">
-            <EventIcon />
+            <EventTypeIcon type="custom_event" />
             <span>{formatter(session.game_actions)}</span>
           </Badge>
         </TooltipTrigger>
@@ -96,8 +97,8 @@ export function SessionCard({
   expandedByDefault,
   highlightedEventTimestamp,
 }: SessionCardProps) {
-  const { site } = useParams();
-  const { data: siteMetadata } = useGetSite(site as string);
+  const sitePath = useSitePath();
+  const { data: siteMetadata } = useGetSite();
   const isGame = siteMetadata?.type === "game";
   const t = useExtracted();
   const { hour12, formatDateTime } = useDateTimeFormat();
@@ -224,7 +225,7 @@ export function SessionCard({
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <Badge className="flex items-center gap-1 bg-neutral-100 dark:bg-neutral-800 text-neutral-600 dark:text-neutral-300">
-                      <PageviewIcon />
+                      <EventTypeIcon type="pageview" />
                       <span>{formatter(session.pageviews)}</span>
                     </Badge>
                   </TooltipTrigger>
@@ -233,16 +234,8 @@ export function SessionCard({
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <Badge className="flex items-center gap-1 bg-neutral-100 dark:bg-neutral-800 text-neutral-600 dark:text-neutral-300">
-                      <EventIcon />
-                      <span>
-                        {formatter(
-                          session.events +
-                            (session.button_clicks || 0) +
-                            (session.copies || 0) +
-                            (session.form_submits || 0) +
-                            (session.input_changes || 0)
-                        )}
-                      </span>
+                      <EventTypeIcon type="custom_event" />
+                      <span>{formatter(sessionEventCount(session))}</span>
                     </Badge>
                   </TooltipTrigger>
                   <TooltipContent>{t("Events")}</TooltipContent>
@@ -261,7 +254,9 @@ export function SessionCard({
         <div className="hidden md:flex items-center gap-2">
           {!userId && (
             <Link
-              href={`/${site}/user/${encodeURIComponent(isIdentified ? session.identified_user_id : session.user_id)}`}
+              href={sitePath(`user/${encodeURIComponent(
+                isIdentified ? session.identified_user_id : session.user_id
+              )}`)}
               onClick={e => e.stopPropagation()}
               className="flex items-center gap-2"
             >
@@ -332,7 +327,7 @@ export function SessionCard({
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <Badge className="flex items-center gap-1 bg-neutral-100 dark:bg-neutral-800 text-neutral-600 dark:text-neutral-300">
-                      <PageviewIcon />
+                      <EventTypeIcon type="pageview" />
                       <span>{formatter(session.pageviews)}</span>
                     </Badge>
                   </TooltipTrigger>
@@ -341,16 +336,8 @@ export function SessionCard({
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <Badge className="flex items-center gap-1 bg-neutral-100 dark:bg-neutral-800 text-neutral-600 dark:text-neutral-300">
-                      <EventIcon />
-                      <span>
-                        {formatter(
-                          session.events +
-                            (session.button_clicks || 0) +
-                            (session.copies || 0) +
-                            (session.form_submits || 0) +
-                            (session.input_changes || 0)
-                        )}
-                      </span>
+                      <EventTypeIcon type="custom_event" />
+                      <span>{formatter(sessionEventCount(session))}</span>
                     </Badge>
                   </TooltipTrigger>
                   <TooltipContent>{t("Events")}</TooltipContent>

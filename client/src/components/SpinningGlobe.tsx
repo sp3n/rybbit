@@ -164,9 +164,14 @@ export function SpinningGlobe() {
 
     mapRef.current = map;
 
+    // The idle spin is decorative, so reduced-motion users get a still globe. The check must stay:
+    // Mapbox honors the setting by making easeTo instant, which fires "moveend" synchronously and
+    // would turn the moveend -> spinGlobe loop below into unbounded recursion.
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+
     // Spin globe function using easeTo for smooth animation
     const spinGlobe = () => {
-      if (!mapRef.current) return;
+      if (!mapRef.current || reducedMotion.matches) return;
       const zoom = mapRef.current.getZoom();
       if (!isUserInteractingRef.current && zoom < MAX_SPIN_ZOOM) {
         let distancePerSecond = 360 / SECONDS_PER_REVOLUTION;
@@ -472,7 +477,7 @@ export function SpinningGlobe() {
           const avatarContainer = document.createElement("div");
           avatarContainer.className = "timeline-avatar-marker";
           avatarContainer.style.cssText =
-            "cursor: pointer; border-radius: 50%; overflow: hidden; width: 32px; height: 32px; box-shadow: 0 2px 8px rgba(0,0,0,0.3);";
+            "cursor: pointer; width: 32px; height: 32px; filter: drop-shadow(0 1px 2px rgba(0,0,0,0.55));";
           avatarContainer.innerHTML = frogAvatarSVG(session.user_id, 32);
 
           const marker = new mapboxgl.Marker({

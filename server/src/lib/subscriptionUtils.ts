@@ -7,7 +7,9 @@ import {
   APPSUMO_REPLAY_LIMITS,
   APPSUMO_TIER_LIMITS,
   DEFAULT_EVENT_LIMIT,
+  FREE_PLAN_CUTOFF_DATE,
   getStripePrices,
+  IS_CLOUD,
   StripePlan,
 } from "./const.js";
 import { stripe } from "./stripe.js";
@@ -41,12 +43,34 @@ export interface StripeSubscriptionInfo {
   trialEnd?: Date;
 }
 
+/**
+ * After a free trial ends without a payment (canceled during the trial, or the first charge
+ * failed), the organization's sites keep collecting for TRIAL_GRACE_DAYS on the trialed plan's
+ * event limit. The organization is on the free tier throughout; this only keeps its sites on.
+ */
+export const TRIAL_GRACE_DAYS = 60;
+
+export interface TrialGrace {
+  subscriptionId: string;
+  /** The plan the organization trialed. */
+  planName: string;
+  trialEndedAt: Date;
+  endsAt: Date;
+  /**
+   * Stripe is still retrying the first charge (past_due). Picking a plan now would start a
+   * second subscription next to the one being retried, so the grace emails wait it out.
+   */
+  retryingPayment: boolean;
+}
+
 export interface FreeSubscriptionInfo {
   source: "free";
   eventLimit: number;
   periodStart: string;
   planName: "free";
   status: "free";
+  /** Set while the organization is in the grace period after an unpaid trial. */
+  trialGrace?: TrialGrace;
 }
 
 export interface OverrideSubscriptionInfo {
@@ -82,6 +106,13 @@ export type SubscriptionInfo =
 /**
  * Gets the first day of the current month in YYYY-MM-DD format
  */
+/**
+ * `throwOnError`: rethrow a failed lookup instead of reporting "no plan from this source".
+ * Callers that act on a missing plan (the usage cron blocking sites) opt in, so a database
+ * or Stripe hiccup can't turn a paying organization into a free one.
+ */
+type LookupOptions = { throwOnError?: boolean };
+
 function getStartOfMonth(): string {
   return DateTime.now().startOf("month").toISODate() as string;
 }
@@ -90,7 +121,10 @@ function getStartOfMonth(): string {
  * Gets AppSumo subscription info for an organization
  * @returns AppSumo subscription info or null if no active license found
  */
-export async function getAppSumoSubscription(organizationId: string): Promise<AppSumoSubscriptionInfo | null> {
+export async function getAppSumoSubscription(
+  organizationId: string,
+  { throwOnError = false }: LookupOptions = {}
+): Promise<AppSumoSubscriptionInfo | null> {
   try {
     const appsumoLicense = await db.execute(
       sql`SELECT tier, status FROM appsumo.licenses WHERE organization_id = ${organizationId} AND status = 'active' LIMIT 1`
@@ -117,67 +151,88 @@ export async function getAppSumoSubscription(organizationId: string): Promise<Ap
     return null;
   } catch (error) {
     console.error("Error checking AppSumo license:", error);
+    if (throwOnError) throw error;
     return null;
   }
+}
+
+/** The organization's own plan columns. A custom plan, then a plan override, outrank every other source. */
+export type OrgPlanFields = Pick<typeof organization.$inferSelect, "customPlan" | "planOverride">;
+
+/**
+ * Reads the organization's custom plan and plan override in one query. Null when the
+ * organization doesn't exist, or (without `throwOnError`) when the read fails.
+ */
+async function getOrgPlanFields(
+  organizationId: string,
+  { throwOnError = false }: LookupOptions = {}
+): Promise<OrgPlanFields | null> {
+  try {
+    const [org] = await db
+      .select({ customPlan: organization.customPlan, planOverride: organization.planOverride })
+      .from(organization)
+      .where(eq(organization.id, organizationId))
+      .limit(1);
+    return org ?? null;
+  } catch (error) {
+    console.error("Error checking custom plan and plan override:", error);
+    if (throwOnError) throw error;
+    return null;
+  }
+}
+
+function overrideSubscriptionFrom(planOverride: string | null | undefined): OverrideSubscriptionInfo | null {
+  if (!planOverride) {
+    return null;
+  }
+
+  // Check if it's an AppSumo tier override (e.g., "appsumo-1" through "appsumo-7")
+  const appsumoMatch = planOverride.match(/^appsumo-([1-7])$/);
+  if (appsumoMatch) {
+    const tier = appsumoMatch[1] as keyof typeof APPSUMO_TIER_LIMITS;
+    const eventLimit = APPSUMO_TIER_LIMITS[tier];
+
+    return {
+      source: "override",
+      planName: planOverride,
+      eventLimit,
+      replayLimit: APPSUMO_REPLAY_LIMITS[tier] ?? 0,
+      periodStart: getStartOfMonth(),
+      status: "active",
+      interval: "lifetime",
+      cancelAtPeriodEnd: false,
+    };
+  }
+
+  // Look up plan details from the plan name (Stripe plans)
+  const planDetails = getStripePrices().find((plan: StripePlan) => plan.name === planOverride);
+
+  if (!planDetails) {
+    console.error("Plan override not found in price list:", planOverride);
+    return null;
+  }
+
+  return {
+    source: "override",
+    planName: planDetails.name,
+    eventLimit: planDetails.limits.events,
+    replayLimit: planDetails.limits.replays,
+    periodStart: getStartOfMonth(),
+    status: "active",
+    interval: planDetails.interval,
+    cancelAtPeriodEnd: false,
+  };
 }
 
 /**
  * Gets plan override subscription info for an organization
  * @returns Override subscription info or null if no override set
  */
-export async function getOverrideSubscription(organizationId: string): Promise<OverrideSubscriptionInfo | null> {
-  try {
-    const orgResult = await db
-      .select({ planOverride: organization.planOverride })
-      .from(organization)
-      .where(eq(organization.id, organizationId))
-      .limit(1);
-
-    const org = orgResult[0];
-    if (!org?.planOverride) {
-      return null;
-    }
-
-    // Check if it's an AppSumo tier override (e.g., "appsumo-1" through "appsumo-7")
-    const appsumoMatch = org.planOverride.match(/^appsumo-([1-7])$/);
-    if (appsumoMatch) {
-      const tier = appsumoMatch[1] as keyof typeof APPSUMO_TIER_LIMITS;
-      const eventLimit = APPSUMO_TIER_LIMITS[tier];
-
-      return {
-        source: "override",
-        planName: org.planOverride,
-        eventLimit,
-        replayLimit: APPSUMO_REPLAY_LIMITS[tier] ?? 0,
-        periodStart: getStartOfMonth(),
-        status: "active",
-        interval: "lifetime",
-        cancelAtPeriodEnd: false,
-      };
-    }
-
-    // Look up plan details from the plan name (Stripe plans)
-    const planDetails = getStripePrices().find((plan: StripePlan) => plan.name === org.planOverride);
-
-    if (!planDetails) {
-      console.error("Plan override not found in price list:", org.planOverride);
-      return null;
-    }
-
-    return {
-      source: "override",
-      planName: planDetails.name,
-      eventLimit: planDetails.limits.events,
-      replayLimit: planDetails.limits.replays,
-      periodStart: getStartOfMonth(),
-      status: "active",
-      interval: planDetails.interval,
-      cancelAtPeriodEnd: false,
-    };
-  } catch (error) {
-    console.error("Error checking plan override:", error);
-    return null;
-  }
+export async function getOverrideSubscription(
+  organizationId: string,
+  lookup: LookupOptions = {}
+): Promise<OverrideSubscriptionInfo | null> {
+  return overrideSubscriptionFrom((await getOrgPlanFields(organizationId, lookup))?.planOverride);
 }
 
 /**
@@ -190,7 +245,9 @@ export async function getOverrideSubscription(organizationId: string): Promise<O
  * (plan changes, new checkouts) call invalidateStripeSubscriptionCache to refresh early.
  */
 const STRIPE_SUBSCRIPTION_CACHE_TTL_MS = 60_000;
-const stripeSubscriptionCache = new Map<string, { value: StripeSubscriptionInfo | null; expiresAt: number }>();
+/** `latest` is the customer's best subscription in any state, for the post-trial grace period. */
+type StripeCustomerState = { value: StripeSubscriptionInfo | null; latest: Stripe.Subscription | null };
+const stripeSubscriptionCache = new Map<string, StripeCustomerState & { expiresAt: number }>();
 
 /**
  * Drops the cached subscription for a customer so the next read fetches fresh data.
@@ -199,6 +256,8 @@ const stripeSubscriptionCache = new Map<string, { value: StripeSubscriptionInfo 
 export function invalidateStripeSubscriptionCache(stripeCustomerId: string | null): void {
   if (stripeCustomerId) {
     stripeSubscriptionCache.delete(stripeCustomerId);
+    subscriptionHistoryCache.delete(stripeCustomerId);
+    subscriptionPaidCache.delete(stripeCustomerId);
   }
   // Also drop the account-wide snapshot so admin/cron reads pick up the change promptly.
   allStripeSubscriptionsCache = null;
@@ -223,13 +282,15 @@ export function invalidateAllStripeSubscriptionsCache(): void {
 
 /**
  * Ranks a subscription so the "best" one per customer wins when grouping: prefer
- * active/trialing, then the most recently created.
+ * active/trialing, then anything but an abandoned first payment, then the most recently created.
  */
 function rankSubscription(subscription: Stripe.Subscription): number {
   const isActiveOrTrialing = subscription.status === "active" || subscription.status === "trialing";
+  // An incomplete checkout after a lapsed trial must not hide that trial's grace period.
+  const isIncomplete = subscription.status === "incomplete" || subscription.status === "incomplete_expired";
   // `created` is a unix timestamp (~1.7e9); the status weight (×1e13) dominates so an
   // active/trialing sub always outranks a canceled one regardless of creation time.
-  return (isActiveOrTrialing ? 1 : 0) * 1e13 + subscription.created;
+  return (isActiveOrTrialing ? 2 : isIncomplete ? 0 : 1) * 1e13 + subscription.created;
 }
 
 /**
@@ -307,31 +368,38 @@ export function stripeSubscriptionInfoFromSnapshot(
  */
 export async function getStripeSubscription(
   stripeCustomerId: string | null,
-  { throwOnError = false }: { throwOnError?: boolean } = {}
+  options: { throwOnError?: boolean } = {}
 ): Promise<StripeSubscriptionInfo | null> {
+  return (await getStripeCustomerState(stripeCustomerId, options)).value;
+}
+
+async function getStripeCustomerState(
+  stripeCustomerId: string | null,
+  { throwOnError = false }: { throwOnError?: boolean } = {}
+): Promise<StripeCustomerState> {
   if (!stripeCustomerId) {
-    return null;
+    return { value: null, latest: null };
   }
 
   const cached = stripeSubscriptionCache.get(stripeCustomerId);
   if (cached && cached.expiresAt > Date.now()) {
-    return cached.value;
+    return cached;
   }
 
   try {
-    const value = await fetchStripeSubscription(stripeCustomerId);
+    const state = await fetchStripeSubscription(stripeCustomerId);
     stripeSubscriptionCache.set(stripeCustomerId, {
-      value,
+      ...state,
       expiresAt: Date.now() + STRIPE_SUBSCRIPTION_CACHE_TTL_MS,
     });
-    return value;
+    return state;
   } catch (error) {
     console.error("Error fetching Stripe subscription:", error);
     // Prefer the last known value (even if expired) over treating the org as having
     // no subscription — that would silently downgrade a paying customer. A cached
     // `null` is also trustworthy: it means we previously confirmed there was no sub.
     if (cached) {
-      return cached.value;
+      return cached;
     }
     // No cached value at all, so we genuinely don't know this customer's status.
     // Callers that must not mistake a transient Stripe failure for "no subscription"
@@ -340,7 +408,47 @@ export async function getStripeSubscription(
     if (throwOnError) {
       throw error;
     }
-    return null;
+    return { value: null, latest: null };
+  }
+}
+
+const subscriptionHistoryCache = new Map<string, { value: boolean; expiresAt: number }>();
+
+/**
+ * Whether a customer has ever had a subscription, in any state. Organizations get one free
+ * trial: once they have had a subscription, checkout charges straight away and the app says
+ * "Choose a plan" instead of "Start free trial". Abandoned checkouts leave no subscription
+ * (or only an incomplete one), so they do not use up the trial.
+ */
+export async function hasHadStripeSubscription(
+  stripeCustomerId: string | null,
+  { throwOnError = false }: LookupOptions = {}
+): Promise<boolean> {
+  if (!stripe || !stripeCustomerId) {
+    return false;
+  }
+
+  const cached = subscriptionHistoryCache.get(stripeCustomerId);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.value;
+  }
+
+  try {
+    const subs = await (stripe as Stripe).subscriptions.list({ customer: stripeCustomerId, status: "all", limit: 100 });
+    const value = subs.data.some(sub => sub.status !== "incomplete" && sub.status !== "incomplete_expired");
+    subscriptionHistoryCache.set(stripeCustomerId, {
+      value,
+      expiresAt: Date.now() + STRIPE_SUBSCRIPTION_CACHE_TTL_MS,
+    });
+    return value;
+  } catch (error) {
+    logger.error({ err: error, stripeCustomerId }, "Error fetching Stripe subscription history");
+    // An expired "had a subscription" is still true; an expired "never had one" may be out of
+    // date. Checkout opts into throwing so it never grants a second trial by accident; display
+    // callers fall back to the last answer, or to showing the trial copy.
+    if (cached?.value) return true;
+    if (throwOnError) throw error;
+    return cached?.value ?? false;
   }
 }
 
@@ -349,7 +457,47 @@ export async function getStripeSubscription(
  * Uses a single list call (status "all") to halve request volume versus separate
  * active/trialing queries.
  */
-async function fetchStripeSubscription(stripeCustomerId: string): Promise<StripeSubscriptionInfo | null> {
+/**
+ * Whether the customer has a Stripe subscription that will charge again: active, trialing or
+ * past due, and not ending before its next renewal. Deleting the organization (or its last owner)
+ * would leave such a subscription billing with nobody able to manage it. Throws when Stripe
+ * can't be reached, so callers refuse instead of guessing.
+ */
+export async function hasRenewingStripeSubscription(stripeCustomerId: string | null): Promise<boolean> {
+  if (!stripeCustomerId || !stripe) {
+    return false;
+  }
+  let startingAfter: string | undefined;
+  for (;;) {
+    const page = await (stripe as Stripe).subscriptions.list({
+      customer: stripeCustomerId,
+      status: "all",
+      limit: 100,
+      ...(startingAfter && { starting_after: startingAfter }),
+    });
+    if (page.data.some(willRenew)) {
+      return true;
+    }
+    if (!page.has_more || page.data.length === 0) {
+      return false;
+    }
+    startingAfter = page.data[page.data.length - 1].id;
+  }
+}
+
+function willRenew(sub: Stripe.Subscription): boolean {
+  if (sub.status !== "active" && sub.status !== "trialing" && sub.status !== "past_due") {
+    return false;
+  }
+  if (sub.cancel_at_period_end) {
+    return false;
+  }
+  // A scheduled cancel date only stops billing when it lands before the next renewal.
+  const periodEnd = sub.items?.data[0]?.current_period_end;
+  return !(sub.cancel_at && periodEnd && sub.cancel_at <= periodEnd);
+}
+
+async function fetchStripeSubscription(stripeCustomerId: string): Promise<StripeCustomerState> {
   // Fetch active + trialing in a single request and filter locally.
   const subs = await (stripe as Stripe).subscriptions.list({
     customer: stripeCustomerId,
@@ -358,15 +506,116 @@ async function fetchStripeSubscription(stripeCustomerId: string): Promise<Stripe
     expand: ["data.plan.product"],
   });
 
+  // The same pick the bulk snapshot makes, so both paths agree on the grace period.
+  const latest = subs.data.reduce<Stripe.Subscription | null>(
+    (best, sub) => (!best || rankSubscription(sub) > rankSubscription(best) ? sub : best),
+    null
+  );
+
   const allSubs = subs.data.filter(sub => sub.status === "active" || sub.status === "trialing");
 
   if (allSubs.length === 0) {
-    return null;
+    return { value: null, latest };
   }
 
   // Pick the most recently created subscription across both active and trialing
   const subscription = allSubs.sort((a, b) => b.created - a.created)[0];
-  return buildStripeSubscriptionInfo(subscription);
+  return { value: buildStripeSubscriptionInfo(subscription), latest };
+}
+
+const LAPSED_STATUSES = new Set<Stripe.Subscription.Status>(["canceled", "past_due", "unpaid"]);
+
+/**
+ * The grace period a lapsed subscription would earn from its trial: the trial ended (or was
+ * canceled) less than TRIAL_GRACE_DAYS ago. Pure; resolveTrialGrace also checks that the
+ * subscription never took a payment, which is what makes the trial "unpaid".
+ */
+export function lapsedTrialGrace(
+  subscription: Stripe.Subscription,
+  now: Date = new Date()
+): { grace: TrialGrace; eventLimit: number } | null {
+  const trialEnd = subscription.trial_end;
+  const item = subscription.items?.data[0];
+  if (!LAPSED_STATUSES.has(subscription.status) || !trialEnd || !item) {
+    return null;
+  }
+  const plan = getStripePrices().find((p: StripePlan) => p.priceId === item.price.id);
+  if (!plan) {
+    return null;
+  }
+
+  // Canceling during the trial ends it then, not on the date it would have run to.
+  const endedSeconds =
+    subscription.status === "canceled" && subscription.ended_at ? Math.min(subscription.ended_at, trialEnd) : trialEnd;
+  const trialEndedAt = new Date(endedSeconds * 1000);
+  const endsAt = DateTime.fromJSDate(trialEndedAt, { zone: "utc" }).plus({ days: TRIAL_GRACE_DAYS }).toJSDate();
+  if (trialEndedAt > now || endsAt <= now) {
+    return null;
+  }
+
+  return {
+    grace: {
+      subscriptionId: subscription.id,
+      planName: plan.name,
+      trialEndedAt,
+      endsAt,
+      retryingPayment: subscription.status === "past_due",
+    },
+    eventLimit: plan.limits.events,
+  };
+}
+
+// A payment is permanent, so a "paid" answer can be kept for long; "never paid" can change
+// any time and is dropped with the customer's other cached state on every billing webhook.
+const PAID_CACHE_TTL_MS = 24 * 60 * 60_000;
+const UNPAID_CACHE_TTL_MS = 5 * 60_000;
+const subscriptionPaidCache = new Map<string, { subscriptionId: string; value: boolean; expiresAt: number }>();
+
+/**
+ * Whether any invoice on the subscription took money. The trial's own invoice is for $0 and a
+ * first charge that failed is unpaid, so an unpaid trial has none. Neither the billing period
+ * (an unpaid subscription keeps advancing it) nor the latest invoice (a downgrade can leave a
+ * $0 proration invoice last) can answer this.
+ */
+async function subscriptionWasPaid(subscription: Stripe.Subscription): Promise<boolean> {
+  if (!stripe) {
+    return false;
+  }
+  const customerId = typeof subscription.customer === "string" ? subscription.customer : subscription.customer.id;
+  const cached = subscriptionPaidCache.get(customerId);
+  if (cached && cached.subscriptionId === subscription.id && cached.expiresAt > Date.now()) {
+    return cached.value;
+  }
+
+  const invoices = await stripe.invoices.list({ subscription: subscription.id, status: "paid", limit: 100 });
+  const value = invoices.data.some(invoice => invoice.amount_paid > 0);
+  subscriptionPaidCache.set(customerId, {
+    subscriptionId: subscription.id,
+    value,
+    expiresAt: Date.now() + (value ? PAID_CACHE_TTL_MS : UNPAID_CACHE_TTL_MS),
+  });
+  return value;
+}
+
+/** The grace period the customer's lapsed trial gives them right now, if any. */
+async function resolveTrialGrace(
+  subscription: Stripe.Subscription | null | undefined,
+  { throwOnError = false }: LookupOptions = {}
+): Promise<{ grace: TrialGrace; eventLimit: number } | null> {
+  if (!IS_CLOUD || !subscription) {
+    return null;
+  }
+  const candidate = lapsedTrialGrace(subscription);
+  if (!candidate) {
+    return null;
+  }
+  try {
+    return (await subscriptionWasPaid(subscription)) ? null : candidate;
+  } catch (error) {
+    logger.error({ err: error, subscriptionId: subscription.id }, "Error checking a lapsed trial's invoices");
+    if (throwOnError) throw error;
+    return null;
+  }
 }
 
 /**
@@ -432,40 +681,38 @@ function buildStripeSubscriptionInfo(subscription: Stripe.Subscription): StripeS
   };
 }
 
+function customPlanSubscriptionFrom(cp: OrgPlanFields["customPlan"] | undefined): CustomPlanSubscriptionInfo | null {
+  if (!cp) {
+    return null;
+  }
+
+  return {
+    source: "custom",
+    planName: "custom",
+    eventLimit: cp.events,
+    memberLimit: cp.members ?? null,
+    siteLimit: cp.websites ?? null,
+    periodStart: getStartOfMonth(),
+    status: "active",
+    interval: "lifetime",
+    cancelAtPeriodEnd: false,
+  };
+}
+
 /**
  * Gets custom plan subscription info for an organization
  * @returns Custom plan subscription info or null if no custom plan set
  */
-export async function getCustomPlanSubscription(organizationId: string): Promise<CustomPlanSubscriptionInfo | null> {
-  try {
-    const orgResult = await db
-      .select({ customPlan: organization.customPlan })
-      .from(organization)
-      .where(eq(organization.id, organizationId))
-      .limit(1);
+export async function getCustomPlanSubscription(
+  organizationId: string,
+  lookup: LookupOptions = {}
+): Promise<CustomPlanSubscriptionInfo | null> {
+  return customPlanSubscriptionFrom((await getOrgPlanFields(organizationId, lookup))?.customPlan);
+}
 
-    const org = orgResult[0];
-    if (!org?.customPlan) {
-      return null;
-    }
-
-    const cp = org.customPlan;
-
-    return {
-      source: "custom",
-      planName: "custom",
-      eventLimit: cp.events,
-      memberLimit: cp.members ?? null,
-      siteLimit: cp.websites ?? null,
-      periodStart: getStartOfMonth(),
-      status: "active",
-      interval: "lifetime",
-      cancelAtPeriodEnd: false,
-    };
-  } catch (error) {
-    console.error("Error checking custom plan:", error);
-    return null;
-  }
+/** The plan the organization's own columns set: its custom plan, else its override, else none. */
+function orgOwnPlan(fields: OrgPlanFields | null): CustomPlanSubscriptionInfo | OverrideSubscriptionInfo | null {
+  return customPlanSubscriptionFrom(fields?.customPlan) ?? overrideSubscriptionFrom(fields?.planOverride);
 }
 
 /**
@@ -476,67 +723,71 @@ export async function getCustomPlanSubscription(organizationId: string): Promise
 export async function getBestSubscription(
   organizationId: string,
   stripeCustomerId: string | null,
-  { throwOnStripeError = false }: { throwOnStripeError?: boolean } = {}
+  {
+    throwOnStripeError = false,
+    throwOnLookupError = false,
+    orgPlan,
+  }: {
+    throwOnStripeError?: boolean;
+    throwOnLookupError?: boolean;
+    /** The organization's plan columns, when the caller already read its row (null: no such row). */
+    orgPlan?: OrgPlanFields | null;
+  } = {}
 ): Promise<SubscriptionInfo> {
-  // Check custom plan first - highest priority
-  const customSub = await getCustomPlanSubscription(organizationId);
-  if (customSub) {
-    return customSub;
-  }
+  const lookup = { throwOnError: throwOnLookupError };
 
-  // Check override next
-  const overrideSub = await getOverrideSubscription(organizationId);
-  if (overrideSub) {
-    return overrideSub;
+  // Custom plan first, then override - both from the organization row
+  const ownPlan = orgOwnPlan(orgPlan !== undefined ? orgPlan : await getOrgPlanFields(organizationId, lookup));
+  if (ownPlan) {
+    return ownPlan;
   }
 
   // Get both subscription types
-  const [appsumoSub, stripeSub] = await Promise.all([
-    getAppSumoSubscription(organizationId),
-    getStripeSubscription(stripeCustomerId, { throwOnError: throwOnStripeError }),
+  const throwOnStripe = throwOnStripeError || throwOnLookupError;
+  const [appsumoSub, stripeState] = await Promise.all([
+    getAppSumoSubscription(organizationId, lookup),
+    getStripeCustomerState(stripeCustomerId, { throwOnError: throwOnStripe }),
   ]);
 
-  if (stripeSub) {
-    return stripeSub;
+  if (stripeState.value) {
+    return stripeState.value;
   }
 
   if (appsumoSub) {
     return appsumoSub;
   }
 
-  return freeSubscription();
+  return freeSubscription(await resolveTrialGrace(stripeState.latest, { throwOnError: throwOnStripe }));
 }
 
 /**
  * Like getBestSubscription, but uses an already-resolved Stripe subscription (e.g. from a bulk
  * account snapshot) instead of making a per-customer Stripe call. Used by callers that resolve
- * many orgs at once (admin endpoints, the usage cron).
+ * many orgs at once (admin endpoints, the usage cron). Pass the customer's raw subscription from
+ * the snapshot as `latestStripeSub` to apply the grace period after an unpaid trial.
  * Priority: CustomPlan > Override > Stripe > AppSumo > Free.
  */
 export async function getBestSubscriptionFromStripeSub(
   organizationId: string,
-  stripeSub: StripeSubscriptionInfo | null
+  stripeSub: StripeSubscriptionInfo | null,
+  lookup: LookupOptions = {},
+  latestStripeSub?: Stripe.Subscription | null
 ): Promise<SubscriptionInfo> {
-  const customSub = await getCustomPlanSubscription(organizationId);
-  if (customSub) {
-    return customSub;
-  }
-
-  const overrideSub = await getOverrideSubscription(organizationId);
-  if (overrideSub) {
-    return overrideSub;
+  const ownPlan = orgOwnPlan(await getOrgPlanFields(organizationId, lookup));
+  if (ownPlan) {
+    return ownPlan;
   }
 
   if (stripeSub) {
     return stripeSub;
   }
 
-  const appsumoSub = await getAppSumoSubscription(organizationId);
+  const appsumoSub = await getAppSumoSubscription(organizationId, lookup);
   if (appsumoSub) {
     return appsumoSub;
   }
 
-  return freeSubscription();
+  return freeSubscription(await resolveTrialGrace(latestStripeSub, lookup));
 }
 
 /**
@@ -589,12 +840,34 @@ export function getReplayLimit(subscription: SubscriptionInfo): number {
   }
 }
 
-function freeSubscription(): FreeSubscriptionInfo {
+/**
+ * Whether a site is switched off because its organization has no plan. Only sites created
+ * after the free plan ended are affected; older ones keep the legacy free tier. Accepts either
+ * a SubscriptionInfo or the getSubscriptionInner payload — both report status "free" exactly
+ * when there is no custom plan, override, Stripe subscription or AppSumo license. Sites stay
+ * on during the grace period after an unpaid trial.
+ */
+export function siteRequiresPlan(
+  subscription: { status: string; trialGrace?: { endsAt: Date | string } } | null | undefined,
+  siteCreatedAt: string | null | undefined
+): boolean {
+  if (!IS_CLOUD || subscription?.status !== "free" || !siteCreatedAt) {
+    return false;
+  }
+  if (subscription.trialGrace && new Date(subscription.trialGrace.endsAt) > new Date()) {
+    return false;
+  }
+  return siteCreatedAt.slice(0, 10) >= FREE_PLAN_CUTOFF_DATE;
+}
+
+function freeSubscription(trial: { grace: TrialGrace; eventLimit: number } | null = null): FreeSubscriptionInfo {
   return {
     source: "free",
-    eventLimit: DEFAULT_EVENT_LIMIT,
+    // The grace period keeps the trialed plan's allowance, so sites don't stop at the free one.
+    eventLimit: trial?.eventLimit ?? DEFAULT_EVENT_LIMIT,
     periodStart: getStartOfMonth(),
     planName: "free",
     status: "free",
+    ...(trial && { trialGrace: trial.grace }),
   };
 }
