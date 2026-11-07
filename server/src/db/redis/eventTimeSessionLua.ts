@@ -16,17 +16,26 @@
  * ARGV[3] inactivity gap in milliseconds (30 minutes)
  * ARGV[4] key retention in milliseconds, wall-clock
  * ARGV[5] the most sessions remembered per key
+ * ARGV[6] the caller's current time, epoch milliseconds, as integer text
  *
- * Value: "<id>|<firstMs>|<lastMs>;<id>|<firstMs>|<lastMs>;..." — one span per
- * session this identity had recently.
+ * Value: "<id>|<firstMs>|<lastMs>|<usedMs>;..." - one span per session this
+ * identity had recently, with when the span was last used (wall-clock).
  *
  * An event within the gap of a remembered span joins that session (the nearest
  * one, if two qualify) and widens its span; a span never shrinks, so a late,
  * older event cannot move a session's end backwards. An event near no span
  * starts a new session, which is remembered too, so delivery out of time order
  * (concurrent consumers, live traffic overtaking a backlog) still groups each
- * session's events together. Past the limit, the session that ended longest
- * ago is forgotten.
+ * session's events together.
+ *
+ * When a widened span comes within the gap of another, they were one session
+ * delivered out of order: the two are merged under the chosen id, so every
+ * later event of that session gets one id. Events already stored under the
+ * other id keep it; a bridge that delivers each identity in time order never
+ * produces this.
+ *
+ * Past the limit, the span used longest ago (wall-clock) is forgotten, so a
+ * replay of an older session is not forgotten the moment it starts.
  *
  * Retention is long (the queue's retention, not the gap) so that a session
  * open when an outage began is still known when the backlog drains. A long
@@ -46,17 +55,21 @@ local eventMs = tonumber(eventText)
 local gapMs = tonumber(ARGV[3])
 local retentionMs = ARGV[4]
 local maxSpans = tonumber(ARGV[5])
+local nowText = ARGV[6] or '0'
 
 local spans = {}
 local stored = redis.call('GET', KEYS[1])
 if stored then
-  for id, firstText, lastText in string.gmatch(stored, '([^|;]+)|(%d+)|(%d+)') do
+  for id, firstText, lastText, usedText in string.gmatch(stored, '([^|;]+)|(%d+)|(%d+)|?(%d*)') do
+    if usedText == '' then usedText = '0' end
     spans[#spans + 1] = {
       id = id,
       firstText = firstText,
       lastText = lastText,
+      usedText = usedText,
       first = tonumber(firstText),
       last = tonumber(lastText),
+      used = tonumber(usedText),
     }
   end
 end
@@ -91,13 +104,39 @@ else
   chosen = { id = candidate, firstText = eventText, lastText = eventText, first = eventMs, last = eventMs }
   spans[#spans + 1] = chosen
 end
+chosen.usedText = nowText
+chosen.used = tonumber(nowText)
 
--- Most recently ended first; forget the oldest beyond the limit.
-table.sort(spans, function(a, b) return a.last > b.last end)
+-- Fold in every span the chosen one now reaches within the gap.
+local merged = true
+while merged do
+  merged = false
+  for i = #spans, 1, -1 do
+    local span = spans[i]
+    if span ~= chosen and span.first <= chosen.last + gapMs and span.last >= chosen.first - gapMs then
+      if span.first < chosen.first then
+        chosen.first = span.first
+        chosen.firstText = span.firstText
+      end
+      if span.last > chosen.last then
+        chosen.last = span.last
+        chosen.lastText = span.lastText
+      end
+      table.remove(spans, i)
+      merged = true
+    end
+  end
+end
+
+-- Most recently used first; forget the least recently used beyond the limit.
+table.sort(spans, function(a, b)
+  if a.used ~= b.used then return a.used > b.used end
+  return a.last > b.last
+end)
 local parts = {}
 for i = 1, math.min(#spans, maxSpans) do
   local span = spans[i]
-  parts[#parts + 1] = span.id .. '|' .. span.firstText .. '|' .. span.lastText
+  parts[#parts + 1] = span.id .. '|' .. span.firstText .. '|' .. span.lastText .. '|' .. span.usedText
 end
 redis.call('SET', KEYS[1], table.concat(parts, ';'), 'PX', retentionMs)
 return chosen.id
@@ -128,6 +167,22 @@ if state == 'done' then
   return 'done'
 end
 return 'pending'
+`;
+
+/**
+ * sp3n/rybbit fork: mark a claimed event recorded, unless another delivery
+ * now holds the claim (this one's lease expired and it took over).
+ *
+ * KEYS[1] dedupe key; ARGV[1] the claim token; ARGV[2] done retention, ms.
+ * Returns 1 if marked done.
+ */
+export const COMPLETE_EVENT_ID_LUA = `
+local state = redis.call('GET', KEYS[1])
+if state == false or state == 'pending:' .. ARGV[1] then
+  redis.call('SET', KEYS[1], 'done', 'PX', tonumber(ARGV[2]))
+  return 1
+end
+return 0
 `;
 
 /**

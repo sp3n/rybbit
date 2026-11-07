@@ -1,6 +1,11 @@
 import RedisMock from "ioredis-mock";
 import { beforeEach, describe, expect, it } from "vitest";
-import { CLAIM_EVENT_ID_LUA, EVENT_TIME_SESSION_LUA, RELEASE_EVENT_ID_LUA } from "./eventTimeSessionLua.js";
+import {
+  CLAIM_EVENT_ID_LUA,
+  COMPLETE_EVENT_ID_LUA,
+  EVENT_TIME_SESSION_LUA,
+  RELEASE_EVENT_ID_LUA,
+} from "./eventTimeSessionLua.js";
 
 // sp3n/rybbit fork: behavioural tests for event-time sessions and event-id
 // dedupe, executed for real by ioredis-mock's embedded Lua runtime.
@@ -17,10 +22,12 @@ interface EventTimeMockRedis {
     eventMs: number,
     gapMs: number,
     retentionMs: number,
-    maxSpans: number
+    maxSpans: number,
+    nowMs: number
   ): Promise<string>;
   claimEventId(key: string, pendingMs: number, token: string): Promise<string>;
   releaseEventId(key: string, token: string): Promise<number>;
+  completeEventId(key: string, token: string, retentionMs: number): Promise<number>;
   set(key: string, value: string): Promise<unknown>;
   get(key: string): Promise<string | null>;
   del(key: string): Promise<number>;
@@ -30,6 +37,8 @@ interface EventTimeMockRedis {
 
 let redis: EventTimeMockRedis;
 let candidates = 0;
+// The wall clock the caller passes; each call is one millisecond later.
+let now = 1_800_000_000_000;
 
 /** Session id for one event at `iso` (+ offset minutes); each call offers a fresh candidate id. */
 function sessionAt(key: string, iso: string, offsetMinutes = 0) {
@@ -40,9 +49,13 @@ function sessionAt(key: string, iso: string, offsetMinutes = 0) {
     Date.parse(iso) + offsetMinutes * MINUTE,
     GAP_MS,
     RETENTION_MS,
-    MAX_SPANS
+    MAX_SPANS,
+    (now += 1)
   );
 }
+
+/** A stored span without its last-used time. */
+const span = (stored: string | null, index = 0) => stored!.split(";")[index]!.split("|").slice(0, 3).join("|");
 
 // The keys a retail and a demo site would give the same identified player.
 const RETAIL_ALICE = "event-time:session:1:identified-server:alice";
@@ -67,7 +80,7 @@ describe("eventTimeSession Lua script", () => {
     }
 
     expect(new Set(ids).size).toBe(1);
-    expect(await redis.get(RETAIL_ALICE)).toBe(
+    expect(span(await redis.get(RETAIL_ALICE))).toBe(
       `${ids[0]}|${Date.parse("2026-11-07T08:00:00Z")}|${Date.parse("2026-11-07T10:00:00Z")}`
     );
   });
@@ -130,7 +143,7 @@ describe("eventTimeSession Lua script", () => {
     const id = await sessionAt(RETAIL_ALICE, "2026-11-07T08:30:00Z");
     expect(await sessionAt(RETAIL_ALICE, "2026-11-07T08:10:00Z")).toBe(id);
 
-    expect(await redis.get(RETAIL_ALICE)).toBe(
+    expect(span(await redis.get(RETAIL_ALICE))).toBe(
       `${id}|${Date.parse("2026-11-07T08:10:00Z")}|${Date.parse("2026-11-07T08:30:00Z")}`
     );
   });
@@ -164,15 +177,56 @@ describe("eventTimeSession Lua script", () => {
 
   it("joins the nearer of two sessions when an event falls between them", async () => {
     const early = await sessionAt(RETAIL_ALICE, "2026-11-07T08:00:00Z");
-    const late = await sessionAt(RETAIL_ALICE, "2026-11-07T08:55:00Z");
+    const late = await sessionAt(RETAIL_ALICE, "2026-11-07T09:30:00Z");
 
-    // 26 minutes after the early session, 29 before the late one.
-    expect(await sessionAt(RETAIL_ALICE, "2026-11-07T08:26:00Z")).toBe(early);
-    // Now 24 minutes after the early session's end, 5 before the late one.
-    expect(await sessionAt(RETAIL_ALICE, "2026-11-07T08:50:00Z")).toBe(late);
+    // 25 minutes after the early session, 65 before the late one: early only.
+    expect(await sessionAt(RETAIL_ALICE, "2026-11-07T08:25:00Z")).toBe(early);
+    // 20 minutes before the late session, 45 after the early one: late only.
+    expect(await sessionAt(RETAIL_ALICE, "2026-11-07T09:10:00Z")).toBe(late);
   });
 
-  it("forgets the session that ended longest ago beyond the span limit", async () => {
+  it("merges two sessions an event bridges, so every later event gets one id", async () => {
+    // Delivered out of order: 08:00, 08:55, 08:26, 08:50 (gaps 26, 24 and 5 minutes).
+    const a = await sessionAt(RETAIL_ALICE, "2026-11-07T08:00:00Z");
+    const b = await sessionAt(RETAIL_ALICE, "2026-11-07T08:55:00Z");
+    const bridge = await sessionAt(RETAIL_ALICE, "2026-11-07T08:26:00Z");
+    const after = await sessionAt(RETAIL_ALICE, "2026-11-07T08:50:00Z");
+
+    expect(b).not.toBe(a); // already stored under its own id
+    expect(bridge).toBe(a);
+    expect(after).toBe(a);
+    const stored = (await redis.get(RETAIL_ALICE))!.split(";");
+    expect(stored).toHaveLength(1);
+    expect(span(stored.join(";"))).toBe(
+      `${a}|${Date.parse("2026-11-07T08:00:00Z")}|${Date.parse("2026-11-07T08:55:00Z")}`
+    );
+  });
+
+  it("keeps an older session being replayed after the span limit is reached", async () => {
+    for (let day = 0; day < MAX_SPANS; day += 1) {
+      await sessionAt(RETAIL_ALICE, "2026-11-07T08:00:00Z", day * 24 * 60 * -1 + 0);
+    }
+    // A backlog from before all of them, delivered now.
+    const ids = [
+      await sessionAt(RETAIL_ALICE, "2026-10-20T08:00:00Z"),
+      await sessionAt(RETAIL_ALICE, "2026-10-20T08:10:00Z"),
+      await sessionAt(RETAIL_ALICE, "2026-10-20T08:20:00Z"),
+    ];
+
+    expect(new Set(ids).size).toBe(1);
+  });
+
+  it("reads spans stored before last-used times were kept", async () => {
+    const legacyId = "legacy-session";
+    await redis.set(
+      RETAIL_ALICE,
+      `${legacyId}|${Date.parse("2026-11-07T08:00:00Z")}|${Date.parse("2026-11-07T08:10:00Z")}`
+    );
+
+    expect(await sessionAt(RETAIL_ALICE, "2026-11-07T08:20:00Z")).toBe(legacyId);
+  });
+
+  it("forgets the session used longest ago beyond the span limit", async () => {
     const first = await sessionAt(RETAIL_ALICE, "2026-11-01T00:00:00Z");
     for (let hour = 1; hour <= MAX_SPANS; hour += 1) {
       await sessionAt(RETAIL_ALICE, "2026-11-01T00:00:00Z", hour * 60);
@@ -199,6 +253,7 @@ describe("claimEventId Lua script", () => {
     const client = new RedisMock();
     client.defineCommand("claimEventId", { numberOfKeys: 1, lua: CLAIM_EVENT_ID_LUA });
     client.defineCommand("releaseEventId", { numberOfKeys: 1, lua: RELEASE_EVENT_ID_LUA });
+    client.defineCommand("completeEventId", { numberOfKeys: 1, lua: COMPLETE_EVENT_ID_LUA });
     redis = client as unknown as EventTimeMockRedis;
     await redis.flushall();
   });
@@ -237,6 +292,22 @@ describe("claimEventId Lua script", () => {
 
     expect(await redis.releaseEventId("event-id:1:env-1", "t1")).toBe(0);
     expect(await redis.get("event-id:1:env-1")).toBe("done");
+  });
+
+  it("marks its own claim done", async () => {
+    await redis.claimEventId("event-id:1:env-1", PENDING_MS, "t1");
+
+    expect(await redis.completeEventId("event-id:1:env-1", "t1", 60_000)).toBe(1);
+    expect(await redis.get("event-id:1:env-1")).toBe("done");
+  });
+
+  it("does not overwrite a claim another delivery took over after this lease expired", async () => {
+    await redis.claimEventId("event-id:1:env-1", PENDING_MS, "t1");
+    await redis.set("event-id:1:env-1", "pending:t2"); // t1 expired; t2 claimed
+
+    expect(await redis.completeEventId("event-id:1:env-1", "t1", 60_000)).toBe(0);
+    expect(await redis.releaseEventId("event-id:1:env-1", "t1")).toBe(0);
+    expect(await redis.get("event-id:1:env-1")).toBe("pending:t2");
   });
 
   it("scopes claims by site, so demo and retail never collide", async () => {

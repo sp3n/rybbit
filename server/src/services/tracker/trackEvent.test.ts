@@ -14,7 +14,7 @@ vi.mock("./ingestEvent.js", () => ({
   ingestEvent: mocks.ingestEvent,
 }));
 
-import { RateLimitedIngestError, RetryableIngestError } from "./ingestErrors.js";
+import { PermanentIngestError, RateLimitedIngestError, RetryableIngestError } from "./ingestErrors.js";
 import { trackEvent } from "./trackEvent.js";
 
 const resolvedRequest = { payload: { site_id: "site_abc" }, site: { siteId: 42 } };
@@ -160,6 +160,15 @@ describe("trackEvent retriable answers", () => {
 
     expect(reply.status).toHaveBeenCalledWith(429);
     expect(reply.header).toHaveBeenCalledWith("retry-after", "30");
+  });
+
+  it("answers 422 for an event that can never be stored", async () => {
+    mocks.ingestEvent.mockRejectedValue(new PermanentIngestError("ClickHouse refused the event (27)"));
+    const reply = replyStub();
+
+    await trackEvent(requestWithBody(validBody), reply);
+
+    expect(reply.status).toHaveBeenCalledWith(422);
   });
 
   it("answers a redelivered event as a duplicate", async () => {

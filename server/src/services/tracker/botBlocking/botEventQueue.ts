@@ -3,6 +3,7 @@ import { toClickHouseDateTime } from "../../../db/clickhouse/dateTime.js";
 import { getLocation } from "../../../db/geolocation/geolocation.js";
 import { createServiceLogger } from "../../../lib/logger/logger.js";
 import { getDeviceType } from "../../../utils.js";
+import { resolveLocation } from "../geoOverride.js";
 import { clearSelfReferrer, type TotalTrackingPayload } from "../utils.js";
 import type { BotEventProperties } from "./index.js";
 
@@ -56,10 +57,11 @@ class BotEventQueue {
       const geoData = await getLocation(ips);
 
       const processedBotEvents = batch.map(event => {
-        const dataForIp = geoData?.[event.ipAddress];
+        // sp3n/rybbit fork: a trusted caller's geography, as for events (geoOverride.ts).
+        const location = resolveLocation(event.geoOverride, geoData?.[event.ipAddress]);
 
-        const countryCode = dataForIp?.countryIso || "";
-        const regionCode = dataForIp?.region || "";
+        const countryCode = location.countryIso;
+        const regionCode = location.region;
         const referrer = clearSelfReferrer(event.referrer || "", event.hostname || "");
 
         return {
@@ -77,9 +79,9 @@ class BotEventQueue {
           operating_system_version: event.ua.os.version || "",
           country: countryCode,
           region: countryCode && regionCode ? countryCode + "-" + regionCode : "",
-          city: dataForIp?.city || "",
-          lat: dataForIp?.latitude || 0,
-          lon: dataForIp?.longitude || 0,
+          city: location.city,
+          lat: location.latitude,
+          lon: location.longitude,
           screen_width: event.screenWidth || 0,
           screen_height: event.screenHeight || 0,
           device_type: getDeviceType(event.screenWidth, event.screenHeight, event.ua),

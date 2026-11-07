@@ -56,7 +56,7 @@ vi.mock("./eventDedupe.js", () => ({
 }));
 
 import { ingestEvent } from "./ingestEvent.js";
-import { RetryableIngestError } from "./ingestErrors.js";
+import { PermanentIngestError, RetryableIngestError } from "./ingestErrors.js";
 
 const site = {
   id: "site_abc",
@@ -442,6 +442,38 @@ describe("ingestEvent event time and dedupe", () => {
 
     await expect(ingestEvent(replayed())).rejects.toBeInstanceOf(RetryableIngestError);
     expect(mocks.addDurable).not.toHaveBeenCalled();
+  });
+
+  it("asks for a retry after the bounded wait, and settles the claim when the insert does", async () => {
+    vi.useFakeTimers();
+    try {
+      let stored: () => void = () => {};
+      mocks.addDurable.mockReturnValue(new Promise<void>(resolve => (stored = resolve)));
+
+      const attempt = ingestEvent(replayed());
+      const outcome = attempt.then(
+        () => "acknowledged",
+        error => error
+      );
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      expect(await outcome).toBeInstanceOf(RetryableIngestError);
+      expect(mocks.completeClaim).not.toHaveBeenCalled();
+      expect(mocks.releaseClaim).not.toHaveBeenCalled();
+
+      stored();
+      await vi.waitFor(() => expect(mocks.completeClaim).toHaveBeenCalledOnce());
+      expect(mocks.releaseClaim).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("passes a refused row through as permanent, and releases the claim", async () => {
+    mocks.addDurable.mockRejectedValue(new PermanentIngestError("ClickHouse refused the event (27)"));
+
+    await expect(ingestEvent(replayed())).rejects.toBeInstanceOf(PermanentIngestError);
+    expect(mocks.releaseClaim).toHaveBeenCalledOnce();
   });
 
   it("does not wait for ClickHouse when there is no event id", async () => {

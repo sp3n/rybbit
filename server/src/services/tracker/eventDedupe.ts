@@ -28,7 +28,9 @@ const logger = createServiceLogger("event-dedupe");
  * token-checked release sent straight after it lands after it and removes
  * it, so the retry is not blocked until the pending claim expires.
  */
-const CLAIM_PENDING_MS = 5 * 60 * 1000;
+// Longer than any wait for ClickHouse (ingestEvent.ts, and the client's
+// 300-second insert timeout), so a live delivery never loses its lease.
+const CLAIM_PENDING_MS = 10 * 60 * 1000;
 const DONE_RETENTION_MS = MAX_EVENT_AGE_MS;
 
 export type EventClaim =
@@ -64,7 +66,7 @@ export async function claimEvent(siteId: number, eventId: string | undefined): P
     duplicate: false,
     complete: async () => {
       try {
-        await completeEventId(key, DONE_RETENTION_MS);
+        await completeEventId(key, token, DONE_RETENTION_MS);
       } catch (error) {
         // The event is stored; the pending claim expires and a later
         // redelivery would store it again. Logged so the duplicate is explicable.

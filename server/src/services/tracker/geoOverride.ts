@@ -30,7 +30,12 @@ export const geoOverrideSchema = z
       .regex(/^[A-Za-z0-9_+\-/]+$/),
   })
   .partial()
-  .strict();
+  .strict()
+  // Finer fields are only meaningful with the country they belong to; without
+  // it they could be stored beside the IP lookup's country.
+  .refine(geo => geo.country !== undefined || Object.keys(geo).length === 0, {
+    message: "geo needs country whenever it has any other field",
+  });
 
 export type GeoOverride = z.infer<typeof geoOverrideSchema>;
 

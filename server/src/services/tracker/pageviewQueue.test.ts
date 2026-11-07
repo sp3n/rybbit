@@ -1,3 +1,5 @@
+import { ClickHouseError } from "@clickhouse/client";
+import { PermanentIngestError } from "./ingestErrors.js";
 import { Settings } from "luxon";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type UAParser from "ua-parser-js";
@@ -232,7 +234,41 @@ describe("pageviewQueue", () => {
     );
     await vi.advanceTimersByTimeAsync(1000);
 
-    expect(await outcome).toBe("clickhouse down");
+    expect(await outcome).toBe("the event could not be stored");
+  });
+
+  it("stores the good rows and refuses only the row ClickHouse rejects", async () => {
+    const refused = new ClickHouseError({ message: "Cannot parse input", code: "27", type: "CANNOT_PARSE_INPUT" });
+    mocks.insert
+      .mockRejectedValueOnce(refused) // the strict insert of both rows
+      .mockResolvedValueOnce(undefined) // the good row alone
+      .mockRejectedValueOnce(refused); // the bad row alone
+
+    const good = pageviewQueue.addDurable(makePayload({ pathname: "/good" }));
+    const bad = pageviewQueue.addDurable(makePayload({ pathname: "/bad" }));
+    const outcomes = Promise.allSettled([good, bad]);
+    await vi.advanceTimersByTimeAsync(1000);
+
+    const [goodOutcome, badOutcome] = await outcomes;
+    expect(goodOutcome.status).toBe("fulfilled");
+    expect(badOutcome).toMatchObject({ status: "rejected", reason: expect.any(PermanentIngestError) });
+  });
+
+  it("inserts durable rows without the tolerance for skipped rows", async () => {
+    const durable = pageviewQueue.addDurable(makePayload());
+    await vi.advanceTimersByTimeAsync(1000);
+    await durable;
+
+    const settings = mocks.insert.mock.calls[0][0].clickhouse_settings;
+    expect(settings.input_format_allow_errors_num).toBeUndefined();
+  });
+
+  it("settles a durable row the queue filter drops as handled, without an insert", async () => {
+    const dropped = pageviewQueue.addDurable(makePayload({ site_id: 9133, screenWidth: 800, screenHeight: 600 }));
+    await vi.advanceTimersByTimeAsync(1000);
+
+    await expect(dropped).resolves.toBeUndefined();
+    expect(mocks.insert).not.toHaveBeenCalled();
   });
 
   it("inserts with settings that keep one bad row from failing the batch", async () => {

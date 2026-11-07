@@ -30,3 +30,11 @@ export class RateLimitedIngestError extends Error {
     this.retryAfterSeconds = retryAfterSeconds;
   }
 }
+
+/**
+ * Answer 422: this event can never be stored as sent (ClickHouse refused its
+ * row). Retrying would only repeat the failure; the caller should dead-letter it.
+ */
+export class PermanentIngestError extends Error {
+  readonly statusCode = 422;
+}

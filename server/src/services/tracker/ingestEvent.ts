@@ -5,13 +5,18 @@ import { usageService } from "../usageService.js";
 import { botEventQueue, botObservationQueue } from "./botBlocking/botEventQueue.js";
 import { checkBotBlocking } from "./botBlocking/index.js";
 import { claimEvent } from "./eventDedupe.js";
-import { RetryableIngestError } from "./ingestErrors.js";
+import { PermanentIngestError, RetryableIngestError } from "./ingestErrors.js";
 import { pageviewQueue } from "./pageviewQueue.js";
 import { truncateUrlForStorage } from "./trackingPayload.js";
 import type { TrackingRequest } from "./trackingRequest.js";
 import { createBasePayload } from "./utils.js";
 
 const logger = createServiceLogger("ingest-event");
+
+// sp3n/rybbit fork: how long a trusted delivery waits for its row to reach
+// ClickHouse before it is told to retry. Its claim stays pending meanwhile
+// (eventDedupe.ts), so the retry cannot record the event twice.
+const DURABLE_WAIT_MS = 30_000;
 
 type MatchedExclusion = Extract<SiteExclusionDecision, { excluded: true }>;
 
@@ -32,9 +37,18 @@ export type IngestOutcome =
 /**
  * sp3n/rybbit fork: an event a trusted caller marked with `event_id` is
  * recorded at most once (eventDedupe.ts), and is only reported as recorded
- * once it is in ClickHouse: the caller acknowledges its queue message on our
- * answer. The claim is marked done after that, or given back if recording
- * throws, so the caller's retry is not mistaken for a duplicate.
+ * once its row is in ClickHouse: the caller acknowledges its queue message on
+ * our answer.
+ *
+ * - Stored: the claim is marked done, and every later delivery is a duplicate.
+ * - Not stored: the claim is given back, so the caller's retry records it.
+ * - Still storing after DURABLE_WAIT_MS: the caller is told to retry, and the
+ *   claim settles in the background when the insert does; until then retries
+ *   find it pending (503).
+ *
+ * Outcomes that drop the event on purpose (excluded, over limit, no plan, an
+ * enforced bot) also mark the claim done: "done" means handled, as for an
+ * untrusted event, and redelivery does not reconsider the decision.
  */
 export async function ingestEvent(trackingRequest: TrackingRequest): Promise<IngestOutcome> {
   const claim = await claimEvent(trackingRequest.site.siteId, trackingRequest.eventId);
@@ -43,16 +57,47 @@ export async function ingestEvent(trackingRequest: TrackingRequest): Promise<Ing
     return { status: "duplicate" };
   }
 
-  let outcome: IngestOutcome;
+  let recorded: RecordedEvent;
   try {
-    outcome = await recordEvent(trackingRequest);
+    recorded = await recordEvent(trackingRequest);
   } catch (error) {
     await claim.release();
     throw error;
   }
-  await claim.complete();
-  return outcome;
+  if (!recorded.stored) {
+    await claim.complete();
+    return recorded.outcome;
+  }
+
+  const settled = recorded.stored.then(
+    () => claim.complete(),
+    async error => {
+      await claim.release();
+      throw error;
+    }
+  );
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timedOut = new Promise<"timed_out">(resolve => {
+    timer = setTimeout(() => resolve("timed_out"), DURABLE_WAIT_MS);
+  });
+  try {
+    if ((await Promise.race([settled, timedOut])) === "timed_out") {
+      settled.catch(() => {});
+      logger.warn({ siteId: trackingRequest.site.siteId }, "A trusted event is still being stored");
+      throw new RetryableIngestError("the event is still being stored", 30);
+    }
+  } catch (error) {
+    if (error instanceof RetryableIngestError || error instanceof PermanentIngestError) throw error;
+    logger.error({ err: error, siteId: trackingRequest.site.siteId }, "A trusted event was not stored");
+    throw new RetryableIngestError("the event could not be stored");
+  } finally {
+    clearTimeout(timer);
+  }
+  return recorded.outcome;
 }
+
+/** sp3n/rybbit fork: what recordEvent did, and, for a durable event, when its row is stored. */
+type RecordedEvent = { outcome: IngestOutcome; stored?: Promise<void> };
 
 /**
  * Take one resolved Tracking Request through the ingestion pipeline.
@@ -74,7 +119,7 @@ export async function ingestEvent(trackingRequest: TrackingRequest): Promise<Ing
  *   5. Enqueue — to `bot_events` if the detection is enforced, otherwise to
  *      `events` plus, when something was detected, `bot_observations`.
  */
-async function recordEvent(trackingRequest: TrackingRequest): Promise<IngestOutcome> {
+async function recordEvent(trackingRequest: TrackingRequest): Promise<RecordedEvent> {
   const { site } = trackingRequest;
 
   // Matched against the URL whole: a query string cut to its column limit
@@ -95,16 +140,16 @@ async function recordEvent(trackingRequest: TrackingRequest): Promise<IngestOutc
 
   if (exclusionDecision.excluded) {
     logger.debug({ siteId: payload.site_id, exclusionReason: exclusionDecision.reason }, "Site exclusion matched");
-    return { status: "excluded", exclusion: exclusionDecision };
+    return { outcome: { status: "excluded", exclusion: exclusionDecision } };
   }
 
   if (usageService.isSiteOverLimit(site.siteId)) {
     logger.debug({ siteId: payload.site_id }, "Skipping event - site over monthly limit");
-    return { status: "over_limit" };
+    return { outcome: { status: "over_limit" } };
   }
 
   if (usageService.isSiteWithoutPlan(site.siteId)) {
-    return { status: "no_plan" };
+    return { outcome: { status: "no_plan" } };
   }
 
   const botDetectionResult = await checkBotBlocking({
@@ -138,7 +183,7 @@ async function recordEvent(trackingRequest: TrackingRequest): Promise<IngestOutc
       sessionId: `bot:${eventPayload.userId}`,
     });
 
-    return { status: "bot" };
+    return { outcome: { status: "bot" } };
   }
 
   const { sessionId } = await sessionsService.updateSession({
@@ -150,18 +195,16 @@ async function recordEvent(trackingRequest: TrackingRequest): Promise<IngestOutc
     eventTimeMs: trackingRequest.eventTimeSupplied ? trackingRequest.receivedAt.getTime() : undefined,
   });
 
-  // sp3n/rybbit fork: a trusted delivery with an event id waits for ClickHouse.
-  const enqueue = trackingRequest.eventId
-    ? (pageview: Parameters<typeof pageviewQueue.addDurable>[0]) =>
-        pageviewQueue.addDurable(pageview).catch(error => {
-          logger.error({ err: error, siteId: site.siteId }, "A trusted event was not stored");
-          throw new RetryableIngestError("the event could not be stored");
-        })
-    : (pageview: Parameters<typeof pageviewQueue.add>[0]) => pageviewQueue.add(pageview);
-  await enqueue({
-    ...eventPayload,
-    sessionId,
-  });
+  // sp3n/rybbit fork: a trusted delivery with an event id waits for its row.
+  let stored: Promise<void> | undefined;
+  if (trackingRequest.eventId) {
+    stored = pageviewQueue.addDurable({ ...eventPayload, sessionId });
+  } else {
+    await pageviewQueue.add({
+      ...eventPayload,
+      sessionId,
+    });
+  }
 
   // The Site has bot blocking turned off, so this hit is tracked like any other
   // — but it was detected, and the detection is worth keeping. Mirroring it to
@@ -176,5 +219,5 @@ async function recordEvent(trackingRequest: TrackingRequest): Promise<IngestOutc
     });
   }
 
-  return { status: "tracked", sessionId };
+  return { outcome: { status: "tracked", sessionId }, stored };
 }

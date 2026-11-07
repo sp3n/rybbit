@@ -105,4 +105,12 @@ describe("geoOverrideSchema", () => {
     expect(geoOverrideSchema.safeParse({ timezone: "Europe/London; DROP" }).success).toBe(false);
     expect(geoOverrideSchema.safeParse({ postalCode: "SW1A" }).success).toBe(false);
   });
+
+  it("refuses finer fields without the country they belong to", () => {
+    expect(
+      geoOverrideSchema.safeParse({ city: "Paris", region: "IDF", latitude: 48.86, longitude: 2.35 }).success
+    ).toBe(false);
+    expect(geoOverrideSchema.safeParse({ timezone: "Europe/Paris" }).success).toBe(false);
+    expect(geoOverrideSchema.safeParse({}).success).toBe(true);
+  });
 });
