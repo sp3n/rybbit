@@ -1,11 +1,13 @@
 import type { FastifyRequest } from "fastify";
 import { createAsnLookup, type AsnLookup } from "../../db/geolocation/asn.js";
+import type { RateLimitDecision } from "../../lib/apiRateLimit.js";
 import { checkApiKey } from "../../lib/auth-utils.js";
 import { hasScope } from "../../lib/scopes.js";
 import { siteConfig, type SiteConfigData } from "../../lib/siteConfig.js";
 import { getRequestUserAgent } from "../../utils.js";
 import { EventTimeError, resolveEventTime } from "./eventTime.js";
 import type { GeoOverride } from "./geoOverride.js";
+import { RateLimitedIngestError } from "./ingestErrors.js";
 import { collectCandidateClientIps, resolveClientIp } from "./resolveClientIp.js";
 import type { ValidatedTrackingPayload } from "./trackingPayload.js";
 
@@ -72,14 +74,29 @@ export interface TrackingRequest {
  * An under-scoped bearer degrades to untrusted client-side traffic (no 4xx) —
  * this is a public ingestion endpoint, not an authenticated API.
  */
-export async function isTrustedServerSideIngestion(request: FastifyRequest, siteId: number): Promise<boolean> {
+export async function isTrustedServerSideIngestion(
+  request: FastifyRequest,
+  siteId: number,
+  carriesTrustedFields = false
+): Promise<boolean> {
   const authHeader = request.headers["authorization"];
   if (typeof authHeader !== "string" || !authHeader.startsWith("Bearer ")) {
     return false;
   }
 
   const apiKeyResult = await checkApiKey(request, { siteId });
+  // sp3n/rybbit fork: a rate-limited bridge must not be quietly downgraded to
+  // untrusted traffic, which would drop its event time, id and geography and
+  // let it acknowledge the event. It is told to back off instead.
+  if (apiKeyResult.rateLimited && carriesTrustedFields) {
+    throw new RateLimitedIngestError(retryAfterSeconds(apiKeyResult.rateLimit));
+  }
   return apiKeyResult.valid && hasScope(apiKeyResult.statements, { resource: "ingest", action: "write" });
+}
+
+/** sp3n/rybbit fork: how long a rate-limited bridge should wait, from the limiter's own reset times. */
+function retryAfterSeconds(decision: RateLimitDecision | undefined): number {
+  return Math.max(1, Math.ceil(decision?.retryAfterSeconds || 60));
 }
 
 /**
@@ -100,7 +117,11 @@ export async function resolveTrackingRequest(
   if (!site) return null;
 
   const lookupAsn = createAsnLookup();
-  const trustedServerSideIngestion = await isTrustedServerSideIngestion(request, site.siteId);
+  const trustedServerSideIngestion = await isTrustedServerSideIngestion(
+    request,
+    site.siteId,
+    payload.timestamp !== undefined || payload.event_id !== undefined || payload.geo !== undefined
+  );
 
   const requestIpAddress = resolveClientIp(request, { firstPartyProxy: site.firstPartyProxy, lookupAsn });
   const requestUserAgent = getRequestUserAgent(request.headers);

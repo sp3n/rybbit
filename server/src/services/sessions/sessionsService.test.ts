@@ -13,6 +13,7 @@ vi.mock("../../db/redis/redis.js", () => ({
   eventTimeSession: (...args: unknown[]) => mocks.eventTimeSession(...args),
 }));
 
+import { RetryableIngestError } from "../tracker/ingestErrors.js";
 import { SessionsService } from "./sessionsService.js";
 
 const SESSION_TTL_MS = 30 * 60 * 1000;
@@ -311,12 +312,13 @@ describe("SessionsService event-time sessions", () => {
 
     expect(result.sessionId).toBe("sess-event-time");
     expect(mocks.sessionGetOrCreate).not.toHaveBeenCalled();
-    const [key, candidate, eventMs, gapMs, retentionMs] = mocks.eventTimeSession.mock.calls[0];
+    const [key, candidate, eventMs, gapMs, retentionMs, maxSpans] = mocks.eventTimeSession.mock.calls[0];
     expect(key).toBe("event-time:session:42:u1");
     expect(candidate).toHaveLength(14);
     expect(eventMs).toBe(eventTimeMs);
     expect(gapMs).toBe(SESSION_TTL_MS);
     expect(retentionMs).toBe(15 * 24 * 60 * 60 * 1000);
+    expect(maxSpans).toBe(16);
   });
 
   it("keeps an identified server-side player on one key across sites only per site", async () => {
@@ -351,13 +353,13 @@ describe("SessionsService event-time sessions", () => {
     expect(keys[0]).toMatch(/^event-time:session:1:identified-server:/);
   });
 
-  it("falls back in-process when Redis fails, without splitting the player", async () => {
+  it("asks the caller to retry when Redis fails, instead of grouping by arrival", async () => {
     mocks.eventTimeSession.mockRejectedValue(new Error("redis down"));
     const eventTimeMs = Date.parse("2026-11-07T08:15:00.000Z");
 
-    const first = await service.updateSession({ userId: "u1", siteId: 42, eventTimeMs });
-    const second = await service.updateSession({ userId: "u1", siteId: 42, eventTimeMs: eventTimeMs + 60_000 });
-
-    expect(second.sessionId).toBe(first.sessionId);
+    await expect(service.updateSession({ userId: "u1", siteId: 42, eventTimeMs })).rejects.toBeInstanceOf(
+      RetryableIngestError
+    );
+    expect(mocks.sessionGetOrCreate).not.toHaveBeenCalled();
   });
 });

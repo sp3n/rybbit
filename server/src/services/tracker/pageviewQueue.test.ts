@@ -208,6 +208,33 @@ describe("pageviewQueue", () => {
     expect(row).toMatchObject({ country: "GB", region: "GB-SCT", city: "Edinburgh", lat: 55.95, lon: -3.19 });
   });
 
+  // sp3n/rybbit fork: a trusted delivery waits for its batch to be stored.
+  it("resolves a durable add once its batch is inserted", async () => {
+    let settled = false;
+    const durable = pageviewQueue.addDurable(makePayload()).then(() => (settled = true));
+
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(1000);
+    await durable;
+    expect(settled).toBe(true);
+    expect(mocks.insert).toHaveBeenCalledOnce();
+  });
+
+  it("rejects a durable add when its batch fails to insert", async () => {
+    mocks.insert.mockRejectedValueOnce(new Error("clickhouse down"));
+
+    const durable = pageviewQueue.addDurable(makePayload());
+    const outcome = durable.then(
+      () => "stored",
+      error => (error as Error).message
+    );
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(await outcome).toBe("clickhouse down");
+  });
+
   it("inserts with settings that keep one bad row from failing the batch", async () => {
     await flush();
 

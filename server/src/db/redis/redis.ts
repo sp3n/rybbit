@@ -98,9 +98,10 @@ interface EventTimeRedis extends Redis {
     candidateId: string,
     eventMs: number,
     gapMs: number,
-    retentionMs: number
+    retentionMs: number,
+    maxSpans: number
   ): Promise<string>;
-  claimEventId(key: string, retentionMs: number): Promise<number>;
+  claimEventId(key: string, pendingMs: number): Promise<string>;
 }
 
 /** The session id for an event at `eventMs`, by event time rather than arrival. Atomic across workers. */
@@ -109,15 +110,30 @@ export function eventTimeSession(
   candidateId: string,
   eventMs: number,
   gapMs: number,
-  retentionMs: number
+  retentionMs: number,
+  maxSpans: number
 ): Promise<string> {
   // Integer text, so the script stores the time exactly as given.
-  return (sessionRedis as EventTimeRedis).eventTimeSession(key, candidateId, Math.trunc(eventMs), gapMs, retentionMs);
+  return (sessionRedis as EventTimeRedis).eventTimeSession(
+    key,
+    candidateId,
+    Math.trunc(eventMs),
+    gapMs,
+    retentionMs,
+    maxSpans
+  );
 }
 
-/** True when this call claimed `key`; false when another delivery already did. */
-export async function claimEventId(key: string, retentionMs: number): Promise<boolean> {
-  return (await (sessionRedis as EventTimeRedis).claimEventId(key, retentionMs)) === 1;
+export type EventIdClaim = "claimed" | "pending" | "done";
+
+/** Claim `key` as pending; or report that another delivery has it pending, or already recorded it. */
+export async function claimEventId(key: string, pendingMs: number): Promise<EventIdClaim> {
+  return (await (sessionRedis as EventTimeRedis).claimEventId(key, pendingMs)) as EventIdClaim;
+}
+
+/** Mark a claimed event as recorded, so every later delivery is dropped as a duplicate. */
+export async function completeEventId(key: string, retentionMs: number): Promise<void> {
+  await sessionRedis.set(key, "done", "PX", retentionMs);
 }
 
 /** Give a claim back, so a delivery that failed to record its event can be retried. */

@@ -28,6 +28,7 @@ vi.mock("../../db/geolocation/asn.js", async importOriginal => {
 });
 
 import { EventTimeError } from "./eventTime.js";
+import { RateLimitedIngestError } from "./ingestErrors.js";
 import { resolveTrackingRequest } from "./trackingRequest.js";
 
 const site = {
@@ -261,5 +262,37 @@ describe("resolveTrackingRequest geography override", () => {
     const resolved = await resolveTrackingRequest(request({ authorization: "Bearer sk_test" }), payload({ geo }));
 
     expect(resolved!.geoOverride).toBeUndefined();
+  });
+});
+
+// sp3n/rybbit fork: a rate-limited bridge is told to back off, not downgraded.
+describe("resolveTrackingRequest with a rate-limited bearer", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.getConfig.mockResolvedValue(site);
+    mocks.lookupAsn.mockReturnValue(null);
+    mocks.checkApiKey.mockResolvedValue({
+      valid: false,
+      role: null,
+      rateLimited: true,
+      rateLimit: { retryAfterSeconds: 12 },
+      statements: null,
+    });
+  });
+
+  it("answers 429 when the request carries trusted-only fields", async () => {
+    const attempt = resolveTrackingRequest(
+      request({ authorization: "Bearer sk_test" }),
+      payload({ timestamp: new Date().toISOString(), event_id: "env-1" })
+    );
+
+    await expect(attempt).rejects.toBeInstanceOf(RateLimitedIngestError);
+    await expect(attempt).rejects.toMatchObject({ statusCode: 429, retryAfterSeconds: 12 });
+  });
+
+  it("keeps the previous behaviour for a plain event: untrusted, not refused", async () => {
+    const resolved = await resolveTrackingRequest(request({ authorization: "Bearer sk_test" }), payload());
+
+    expect(resolved!.trustedServerSideIngestion).toBe(false);
   });
 });

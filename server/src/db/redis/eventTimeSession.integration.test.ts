@@ -7,6 +7,7 @@ import { CLAIM_EVENT_ID_LUA, EVENT_TIME_SESSION_LUA } from "./eventTimeSessionLu
 
 const GAP_MS = 30 * 60 * 1000;
 const RETENTION_MS = 15 * 24 * 60 * 60 * 1000;
+const MAX_SPANS = 16;
 const MINUTE = 60 * 1000;
 
 interface EventTimeMockRedis {
@@ -15,9 +16,11 @@ interface EventTimeMockRedis {
     candidateId: string,
     eventMs: number,
     gapMs: number,
-    retentionMs: number
+    retentionMs: number,
+    maxSpans: number
   ): Promise<string>;
-  claimEventId(key: string, retentionMs: number): Promise<number>;
+  claimEventId(key: string, pendingMs: number): Promise<string>;
+  set(key: string, value: string): Promise<unknown>;
   get(key: string): Promise<string | null>;
   del(key: string): Promise<number>;
   pttl(key: string): Promise<number>;
@@ -30,7 +33,14 @@ let candidates = 0;
 /** Session id for one event at `iso` (+ offset minutes); each call offers a fresh candidate id. */
 function sessionAt(key: string, iso: string, offsetMinutes = 0) {
   candidates += 1;
-  return redis.eventTimeSession(key, `s${candidates}`, Date.parse(iso) + offsetMinutes * MINUTE, GAP_MS, RETENTION_MS);
+  return redis.eventTimeSession(
+    key,
+    `s${candidates}`,
+    Date.parse(iso) + offsetMinutes * MINUTE,
+    GAP_MS,
+    RETENTION_MS,
+    MAX_SPANS
+  );
 }
 
 // The keys a retail and a demo site would give the same identified player.
@@ -124,13 +134,52 @@ describe("eventTimeSession Lua script", () => {
     );
   });
 
-  it("gives an event older than the stored session by more than the gap a session of its own", async () => {
+  it("gives an event older than every remembered session a session of its own, and keeps it", async () => {
     const current = await sessionAt(RETAIL_ALICE, "2026-11-07T10:00:00Z");
     const stray = await sessionAt(RETAIL_ALICE, "2026-11-07T08:00:00Z");
+    const strayAgain = await sessionAt(RETAIL_ALICE, "2026-11-07T08:20:00Z");
     const next = await sessionAt(RETAIL_ALICE, "2026-11-07T10:05:00Z");
 
     expect(stray).not.toBe(current);
+    expect(strayAgain).toBe(stray);
     expect(next).toBe(current);
+  });
+
+  it("groups interleaved delivery of two sessions into exactly two sessions", async () => {
+    // Concurrent consumers, or live traffic overtaking a backlog.
+    const ids = [
+      await sessionAt(RETAIL_ALICE, "2026-11-07T08:00:00Z"),
+      await sessionAt(RETAIL_ALICE, "2026-11-07T10:00:00Z"),
+      await sessionAt(RETAIL_ALICE, "2026-11-07T08:10:00Z"),
+      await sessionAt(RETAIL_ALICE, "2026-11-07T08:20:00Z"),
+      await sessionAt(RETAIL_ALICE, "2026-11-07T10:15:00Z"),
+    ];
+
+    expect(new Set(ids).size).toBe(2);
+    expect(ids[2]).toBe(ids[0]);
+    expect(ids[3]).toBe(ids[0]);
+    expect(ids[4]).toBe(ids[1]);
+  });
+
+  it("joins the nearer of two sessions when an event falls between them", async () => {
+    const early = await sessionAt(RETAIL_ALICE, "2026-11-07T08:00:00Z");
+    const late = await sessionAt(RETAIL_ALICE, "2026-11-07T08:55:00Z");
+
+    // 26 minutes after the early session, 29 before the late one.
+    expect(await sessionAt(RETAIL_ALICE, "2026-11-07T08:26:00Z")).toBe(early);
+    // Now 24 minutes after the early session's end, 5 before the late one.
+    expect(await sessionAt(RETAIL_ALICE, "2026-11-07T08:50:00Z")).toBe(late);
+  });
+
+  it("forgets the session that ended longest ago beyond the span limit", async () => {
+    const first = await sessionAt(RETAIL_ALICE, "2026-11-01T00:00:00Z");
+    for (let hour = 1; hour <= MAX_SPANS; hour += 1) {
+      await sessionAt(RETAIL_ALICE, "2026-11-01T00:00:00Z", hour * 60);
+    }
+
+    const stored = (await redis.get(RETAIL_ALICE))!.split(";");
+    expect(stored).toHaveLength(MAX_SPANS);
+    expect(stored.some(span => span.startsWith(`${first}|`))).toBe(false);
   });
 
   it("keeps the key for the retention period, wall-clock", async () => {
@@ -143,6 +192,8 @@ describe("eventTimeSession Lua script", () => {
 });
 
 describe("claimEventId Lua script", () => {
+  const PENDING_MS = 5 * 60 * 1000;
+
   beforeEach(async () => {
     const client = new RedisMock();
     client.defineCommand("claimEventId", { numberOfKeys: 1, lua: CLAIM_EVENT_ID_LUA });
@@ -150,20 +201,36 @@ describe("claimEventId Lua script", () => {
     await redis.flushall();
   });
 
-  it("claims an event id once", async () => {
-    expect(await redis.claimEventId("event-id:1:env-1", RETENTION_MS)).toBe(1);
-    expect(await redis.claimEventId("event-id:1:env-1", RETENTION_MS)).toBe(0);
+  it("claims an event id as pending, then reports it pending to a concurrent delivery", async () => {
+    expect(await redis.claimEventId("event-id:1:env-1", PENDING_MS)).toBe("claimed");
+    expect(await redis.get("event-id:1:env-1")).toBe("pending");
+    expect(await redis.claimEventId("event-id:1:env-1", PENDING_MS)).toBe("pending");
+  });
+
+  it("reports an event id marked done as a duplicate", async () => {
+    await redis.claimEventId("event-id:1:env-1", PENDING_MS);
+    await redis.set("event-id:1:env-1", "done");
+
+    expect(await redis.claimEventId("event-id:1:env-1", PENDING_MS)).toBe("done");
+  });
+
+  it("lets a pending claim expire, so a delivery that died does not block its retry for long", async () => {
+    await redis.claimEventId("event-id:1:env-1", PENDING_MS);
+    const ttl = await redis.pttl("event-id:1:env-1");
+
+    expect(ttl).toBeGreaterThan(PENDING_MS - 5_000);
+    expect(ttl).toBeLessThanOrEqual(PENDING_MS);
   });
 
   it("scopes claims by site, so demo and retail never collide", async () => {
-    expect(await redis.claimEventId("event-id:1:env-1", RETENTION_MS)).toBe(1);
-    expect(await redis.claimEventId("event-id:2:env-1", RETENTION_MS)).toBe(1);
+    expect(await redis.claimEventId("event-id:1:env-1", PENDING_MS)).toBe("claimed");
+    expect(await redis.claimEventId("event-id:2:env-1", PENDING_MS)).toBe("claimed");
   });
 
   it("can be claimed again once released", async () => {
-    await redis.claimEventId("event-id:1:env-1", RETENTION_MS);
+    await redis.claimEventId("event-id:1:env-1", PENDING_MS);
     await redis.del("event-id:1:env-1");
 
-    expect(await redis.claimEventId("event-id:1:env-1", RETENTION_MS)).toBe(1);
+    expect(await redis.claimEventId("event-id:1:env-1", PENDING_MS)).toBe("claimed");
   });
 });

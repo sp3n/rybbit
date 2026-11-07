@@ -5,6 +5,7 @@ import { usageService } from "../usageService.js";
 import { botEventQueue, botObservationQueue } from "./botBlocking/botEventQueue.js";
 import { checkBotBlocking } from "./botBlocking/index.js";
 import { claimEvent } from "./eventDedupe.js";
+import { RetryableIngestError } from "./ingestErrors.js";
 import { pageviewQueue } from "./pageviewQueue.js";
 import { truncateUrlForStorage } from "./trackingPayload.js";
 import type { TrackingRequest } from "./trackingRequest.js";
@@ -30,7 +31,9 @@ export type IngestOutcome =
 
 /**
  * sp3n/rybbit fork: an event a trusted caller marked with `event_id` is
- * recorded at most once (eventDedupe.ts). The claim is given back if recording
+ * recorded at most once (eventDedupe.ts), and is only reported as recorded
+ * once it is in ClickHouse: the caller acknowledges its queue message on our
+ * answer. The claim is marked done after that, or given back if recording
  * throws, so the caller's retry is not mistaken for a duplicate.
  */
 export async function ingestEvent(trackingRequest: TrackingRequest): Promise<IngestOutcome> {
@@ -40,12 +43,15 @@ export async function ingestEvent(trackingRequest: TrackingRequest): Promise<Ing
     return { status: "duplicate" };
   }
 
+  let outcome: IngestOutcome;
   try {
-    return await recordEvent(trackingRequest);
+    outcome = await recordEvent(trackingRequest);
   } catch (error) {
     await claim.release();
     throw error;
   }
+  await claim.complete();
+  return outcome;
 }
 
 /**
@@ -144,7 +150,15 @@ async function recordEvent(trackingRequest: TrackingRequest): Promise<IngestOutc
     eventTimeMs: trackingRequest.eventTimeSupplied ? trackingRequest.receivedAt.getTime() : undefined,
   });
 
-  await pageviewQueue.add({
+  // sp3n/rybbit fork: a trusted delivery with an event id waits for ClickHouse.
+  const enqueue = trackingRequest.eventId
+    ? (pageview: Parameters<typeof pageviewQueue.addDurable>[0]) =>
+        pageviewQueue.addDurable(pageview).catch(error => {
+          logger.error({ err: error, siteId: site.siteId }, "A trusted event was not stored");
+          throw new RetryableIngestError("the event could not be stored");
+        })
+    : (pageview: Parameters<typeof pageviewQueue.add>[0]) => pageviewQueue.add(pageview);
+  await enqueue({
     ...eventPayload,
     sessionId,
   });

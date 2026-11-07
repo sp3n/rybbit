@@ -14,6 +14,7 @@ vi.mock("./ingestEvent.js", () => ({
   ingestEvent: mocks.ingestEvent,
 }));
 
+import { RateLimitedIngestError, RetryableIngestError } from "./ingestErrors.js";
 import { trackEvent } from "./trackEvent.js";
 
 const resolvedRequest = { payload: { site_id: "site_abc" }, site: { siteId: 42 } };
@@ -28,6 +29,9 @@ function replyStub(): FastifyReply {
       return this;
     }),
     send: vi.fn(function (this: typeof reply) {
+      return this;
+    }),
+    header: vi.fn(function (this: typeof reply) {
       return this;
     }),
   };
@@ -126,5 +130,45 @@ describe("trackEvent", () => {
 
     expect(reply.status).toHaveBeenCalledWith(500);
     expect(reply.send).toHaveBeenCalledWith({ success: false, error: "Failed to track event" });
+  });
+});
+
+// sp3n/rybbit fork: answers a queue-backed caller retries on.
+describe("trackEvent retriable answers", () => {
+  const validBody = { type: "pageview", site_id: "site_abc" };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.resolveTrackingRequest.mockResolvedValue(resolvedRequest);
+  });
+
+  it("answers 503 with Retry-After when the event could not be recorded", async () => {
+    mocks.ingestEvent.mockRejectedValue(new RetryableIngestError("the event could not be stored", 7));
+    const reply = replyStub();
+
+    await trackEvent(requestWithBody(validBody), reply);
+
+    expect(reply.status).toHaveBeenCalledWith(503);
+    expect(reply.header).toHaveBeenCalledWith("retry-after", "7");
+  });
+
+  it("answers 429 with Retry-After for a rate-limited trusted caller", async () => {
+    mocks.resolveTrackingRequest.mockRejectedValue(new RateLimitedIngestError(30));
+    const reply = replyStub();
+
+    await trackEvent(requestWithBody(validBody), reply);
+
+    expect(reply.status).toHaveBeenCalledWith(429);
+    expect(reply.header).toHaveBeenCalledWith("retry-after", "30");
+  });
+
+  it("answers a redelivered event as a duplicate", async () => {
+    mocks.ingestEvent.mockResolvedValue({ status: "duplicate" });
+    const reply = replyStub();
+
+    await trackEvent(requestWithBody(validBody), reply);
+
+    expect(reply.status).toHaveBeenCalledWith(200);
+    expect(reply.send).toHaveBeenCalledWith({ success: true, duplicate: true });
   });
 });

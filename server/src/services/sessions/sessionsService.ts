@@ -3,6 +3,7 @@ import { nanoid } from "nanoid";
 import { createServiceLogger } from "../../lib/logger/logger.js";
 import { eventTimeSession, sessionRedis, sessionGetOrCreate } from "../../db/redis/redis.js";
 import { MAX_EVENT_AGE_MS } from "../tracker/eventTime.js";
+import { RetryableIngestError } from "../tracker/ingestErrors.js";
 import { pickReplaySession, REPLAY_SESSION_LUA } from "./replaySession.js";
 
 // Sessions expire after this much inactivity. Redis refreshes the TTL on every
@@ -15,6 +16,9 @@ const SESSION_TTL_MS = 30 * 60 * 1000;
 // (eventTime.ts), so a session open when an outage began is still known when
 // the backlog drains. See eventTimeSessionLua.ts.
 const EVENT_TIME_SESSION_RETENTION_MS = MAX_EVENT_AGE_MS;
+// sp3n/rybbit fork: sessions remembered per identity, so events delivered out
+// of time order still find their own session (eventTimeSessionLua.ts).
+const EVENT_TIME_SESSION_MAX_SPANS = 16;
 
 // Bounded in-process mirror of the last session id Redis handed back for each
 // (siteId, session identity). It exists purely so a transient Redis failure can
@@ -103,8 +107,13 @@ export class SessionsService {
 
   /**
    * sp3n/rybbit fork: resolve a session by the event's own time
-   * (eventTimeSessionLua.ts). On a Redis failure this degrades to the
-   * wall-clock fallback mirror, as updateSession does.
+   * (eventTimeSessionLua.ts).
+   *
+   * Unlike updateSession there is no in-process fallback: it would group by
+   * arrival, which is exactly what a replayed backlog must not do, and would
+   * split one player across workers. Events with a supplied time come from a
+   * queue-backed caller, so a Redis failure is answered as retriable and the
+   * event waits in that queue instead.
    */
   private async updateEventTimeSession(key: string, candidate: string, eventTimeMs: number) {
     try {
@@ -113,13 +122,13 @@ export class SessionsService {
         candidate,
         eventTimeMs,
         SESSION_TTL_MS,
-        EVENT_TIME_SESSION_RETENTION_MS
+        EVENT_TIME_SESSION_RETENTION_MS,
+        EVENT_TIME_SESSION_MAX_SPANS
       );
-      this.rememberSession(this.fallbackCache, key, sessionId);
       return { sessionId };
     } catch (error) {
-      this.logger.error(error as Error, "Redis event-time session lookup failed; using in-process fallback session id");
-      return { sessionId: this.fallbackSessionId(key, candidate) };
+      this.logger.error(error as Error, "Redis event-time session lookup failed");
+      throw new RetryableIngestError("event-time sessions are unavailable");
     }
   }
 

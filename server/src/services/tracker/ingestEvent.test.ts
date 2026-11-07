@@ -15,6 +15,8 @@ const mocks = vi.hoisted(() => ({
   generateUserIdFromClientId: vi.fn(),
   claimEvent: vi.fn(),
   releaseClaim: vi.fn(),
+  completeClaim: vi.fn(),
+  addDurable: vi.fn(),
 }));
 
 vi.mock("../usageService.js", () => ({
@@ -22,7 +24,7 @@ vi.mock("../usageService.js", () => ({
 }));
 
 vi.mock("./pageviewQueue.js", () => ({
-  pageviewQueue: { add: mocks.addPageview },
+  pageviewQueue: { add: mocks.addPageview, addDurable: mocks.addDurable },
 }));
 
 vi.mock("../sessions/sessionsService.js", () => ({
@@ -54,6 +56,7 @@ vi.mock("./eventDedupe.js", () => ({
 }));
 
 import { ingestEvent } from "./ingestEvent.js";
+import { RetryableIngestError } from "./ingestErrors.js";
 
 const site = {
   id: "site_abc",
@@ -105,7 +108,12 @@ describe("ingestEvent", () => {
     mocks.updateSession.mockResolvedValue({ sessionId: "session-alice" });
     mocks.generateUserId.mockResolvedValue("shared-fingerprint");
     mocks.addPageview.mockResolvedValue(undefined);
-    mocks.claimEvent.mockResolvedValue({ duplicate: false, release: mocks.releaseClaim });
+    mocks.claimEvent.mockResolvedValue({
+      duplicate: false,
+      release: mocks.releaseClaim,
+      complete: mocks.completeClaim,
+    });
+    mocks.addDurable.mockResolvedValue(undefined);
   });
 
   it("queues an accepted event with its session and resolved identity", async () => {
@@ -354,7 +362,12 @@ describe("ingestEvent event time and dedupe", () => {
     mocks.updateSession.mockResolvedValue({ sessionId: "session-alice" });
     mocks.generateUserId.mockResolvedValue("shared-fingerprint");
     mocks.addPageview.mockResolvedValue(undefined);
-    mocks.claimEvent.mockResolvedValue({ duplicate: false, release: mocks.releaseClaim });
+    mocks.claimEvent.mockResolvedValue({
+      duplicate: false,
+      release: mocks.releaseClaim,
+      complete: mocks.completeClaim,
+    });
+    mocks.addDurable.mockResolvedValue(undefined);
   });
 
   const replayed = () =>
@@ -377,7 +390,8 @@ describe("ingestEvent event time and dedupe", () => {
     expect(mocks.updateSession).toHaveBeenCalledWith(
       expect.objectContaining({ identifiedUserOnly: true, eventTimeMs: Date.parse("2026-11-07T08:15:00.250Z") })
     );
-    expect(mocks.addPageview).toHaveBeenCalledWith(expect.objectContaining({ timestamp: "2026-11-07T08:15:00.250Z" }));
+    expect(mocks.addDurable).toHaveBeenCalledWith(expect.objectContaining({ timestamp: "2026-11-07T08:15:00.250Z" }));
+    expect(mocks.addPageview).not.toHaveBeenCalled();
   });
 
   it("sessions by arrival when no event time was supplied", async () => {
@@ -401,17 +415,40 @@ describe("ingestEvent event time and dedupe", () => {
     expect(mocks.addPageview).not.toHaveBeenCalled();
   });
 
-  it("gives the claim back when recording fails, so a retry is not dropped", async () => {
-    mocks.addPageview.mockRejectedValue(new Error("queue down"));
+  it("gives the claim back and asks for a retry when the event is not stored", async () => {
+    mocks.addDurable.mockRejectedValue(new Error("clickhouse down"));
 
-    await expect(ingestEvent(replayed())).rejects.toThrow("queue down");
+    await expect(ingestEvent(replayed())).rejects.toBeInstanceOf(RetryableIngestError);
     expect(mocks.releaseClaim).toHaveBeenCalledOnce();
+    expect(mocks.completeClaim).not.toHaveBeenCalled();
   });
 
-  it("keeps the claim once the event is recorded", async () => {
-    await ingestEvent(replayed());
+  it("marks the claim done only after the event is stored", async () => {
+    let stored: () => void = () => {};
+    mocks.addDurable.mockReturnValue(new Promise<void>(resolve => (stored = resolve)));
 
+    const pending = ingestEvent(replayed());
+    await vi.waitFor(() => expect(mocks.addDurable).toHaveBeenCalled());
+    expect(mocks.completeClaim).not.toHaveBeenCalled();
+
+    stored();
+    await pending;
+    expect(mocks.completeClaim).toHaveBeenCalledOnce();
     expect(mocks.releaseClaim).not.toHaveBeenCalled();
+  });
+
+  it("lets a retriable claim failure through without recording", async () => {
+    mocks.claimEvent.mockRejectedValue(new RetryableIngestError("another delivery of this event is being recorded"));
+
+    await expect(ingestEvent(replayed())).rejects.toBeInstanceOf(RetryableIngestError);
+    expect(mocks.addDurable).not.toHaveBeenCalled();
+  });
+
+  it("does not wait for ClickHouse when there is no event id", async () => {
+    await ingestEvent(trackingRequest());
+
+    expect(mocks.addPageview).toHaveBeenCalledOnce();
+    expect(mocks.addDurable).not.toHaveBeenCalled();
   });
 });
 
@@ -426,7 +463,12 @@ describe("ingestEvent geography override", () => {
     mocks.updateSession.mockResolvedValue({ sessionId: "session-alice" });
     mocks.generateUserId.mockResolvedValue("shared-fingerprint");
     mocks.addPageview.mockResolvedValue(undefined);
-    mocks.claimEvent.mockResolvedValue({ duplicate: false, release: mocks.releaseClaim });
+    mocks.claimEvent.mockResolvedValue({
+      duplicate: false,
+      release: mocks.releaseClaim,
+      complete: mocks.completeClaim,
+    });
+    mocks.addDurable.mockResolvedValue(undefined);
   });
 
   it("passes a trusted country to exclusions and the geography to the queue", async () => {

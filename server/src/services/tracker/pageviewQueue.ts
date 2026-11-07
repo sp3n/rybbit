@@ -28,6 +28,8 @@ class PageviewQueue {
   private interval = PAGEVIEW_FLUSH_INTERVAL_MS;
   private processing = false;
   private logger = createServiceLogger("pageview-queue");
+  // sp3n/rybbit fork: callers waiting for their event to reach ClickHouse (addDurable).
+  private waiters = new WeakMap<TotalPayload, { resolve: () => void; reject: (error: unknown) => void }>();
 
   constructor() {
     // Start processing interval
@@ -36,6 +38,32 @@ class PageviewQueue {
 
   async add(pageview: TotalPayload) {
     this.queue.push(pageview);
+  }
+
+  /**
+   * sp3n/rybbit fork: queue an event and resolve once the batch holding it has
+   * been inserted into ClickHouse; reject if that insert fails.
+   *
+   * `add` returns as soon as the event is buffered, and a failed insert is only
+   * logged, so a queue-backed caller that acknowledged its delivery on our 200
+   * would lose the event. Trusted deliveries with an `event_id` wait for this
+   * instead (ingestEvent.ts), at the cost of up to one flush interval.
+   */
+  addDurable(pageview: TotalPayload): Promise<void> {
+    return new Promise((resolve, reject) => {
+      this.waiters.set(pageview, { resolve, reject });
+      this.queue.push(pageview);
+    });
+  }
+
+  private settle(batch: TotalPayload[], error?: unknown) {
+    for (const pageview of batch) {
+      const waiter = this.waiters.get(pageview);
+      if (!waiter) continue;
+      this.waiters.delete(pageview);
+      if (error === undefined) waiter.resolve();
+      else waiter.reject(error);
+    }
   }
 
   /**
@@ -159,8 +187,10 @@ class PageviewQueue {
         format: "JSONEachRow",
         clickhouse_settings: EVENTS_INSERT_SETTINGS,
       });
+      this.settle(batch);
     } catch (error) {
       this.logger.error({ err: error }, "Error processing pageview queue");
+      this.settle(batch, error);
     } finally {
       this.processing = false;
     }
