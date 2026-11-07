@@ -323,9 +323,27 @@ describe("SessionsService event-time sessions", () => {
     mocks.eventTimeSession.mockResolvedValue("x");
     const eventTimeMs = Date.parse("2026-11-07T08:15:00.000Z");
 
-    await service.updateSession({ userId: "fp", identifiedUserId: "player-7", identifiedUserOnly: true, siteId: 1, eventTimeMs });
-    await service.updateSession({ userId: "fp-other-day", identifiedUserId: "player-7", identifiedUserOnly: true, siteId: 1, eventTimeMs });
-    await service.updateSession({ userId: "fp", identifiedUserId: "player-7", identifiedUserOnly: true, siteId: 2, eventTimeMs });
+    await service.updateSession({
+      userId: "fp",
+      identifiedUserId: "player-7",
+      identifiedUserOnly: true,
+      siteId: 1,
+      eventTimeMs,
+    });
+    await service.updateSession({
+      userId: "fp-other-day",
+      identifiedUserId: "player-7",
+      identifiedUserOnly: true,
+      siteId: 1,
+      eventTimeMs,
+    });
+    await service.updateSession({
+      userId: "fp",
+      identifiedUserId: "player-7",
+      identifiedUserOnly: true,
+      siteId: 2,
+      eventTimeMs,
+    });
 
     const keys = mocks.eventTimeSession.mock.calls.map(call => call[0]);
     expect(keys[0]).toBe(keys[1]); // a new salt day's fingerprint does not split the player

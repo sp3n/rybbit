@@ -151,8 +151,7 @@ describe("resolveTrackingRequest", () => {
 
 // sp3n/rybbit fork: a trusted bridge supplies each event's own time and id.
 describe("resolveTrackingRequest event time and id", () => {
-  const trusted = () =>
-    mocks.checkApiKey.mockResolvedValue({ valid: true, statements: { ingest: ["write"] } });
+  const trusted = () => mocks.checkApiKey.mockResolvedValue({ valid: true, statements: { ingest: ["write"] } });
   const bearer = () => request({ authorization: "Bearer sk_test" });
 
   beforeEach(() => {

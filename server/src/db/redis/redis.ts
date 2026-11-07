@@ -93,7 +93,13 @@ sessionRedis.defineCommand("eventTimeSession", { numberOfKeys: 1, lua: EVENT_TIM
 sessionRedis.defineCommand("claimEventId", { numberOfKeys: 1, lua: CLAIM_EVENT_ID_LUA });
 
 interface EventTimeRedis extends Redis {
-  eventTimeSession(key: string, candidateId: string, eventMs: number, gapMs: number, retentionMs: number): Promise<string>;
+  eventTimeSession(
+    key: string,
+    candidateId: string,
+    eventMs: number,
+    gapMs: number,
+    retentionMs: number
+  ): Promise<string>;
   claimEventId(key: string, retentionMs: number): Promise<number>;
 }
 

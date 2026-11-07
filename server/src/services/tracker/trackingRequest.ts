@@ -62,7 +62,6 @@ export interface TrackingRequest {
   eventId?: string;
 }
 
-
 /**
  * Whether a bearer token authorises this request to declare its own client IP
  * and user agent.

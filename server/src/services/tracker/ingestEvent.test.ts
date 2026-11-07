@@ -363,7 +363,12 @@ describe("ingestEvent event time and dedupe", () => {
       receivedAt: new Date("2026-11-07T08:15:00.250Z"),
       eventTimeSupplied: true,
       eventId: "env-1",
-      payload: { type: "custom_event", site_id: "site_abc", event_name: "level_start", user_id: "player-7" } as TrackingRequest["payload"],
+      payload: {
+        type: "custom_event",
+        site_id: "site_abc",
+        event_name: "level_start",
+        user_id: "player-7",
+      } as TrackingRequest["payload"],
     });
 
   it("stores a supplied event time and sessions it by event time", async () => {

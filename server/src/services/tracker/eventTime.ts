@@ -22,9 +22,7 @@ export class EventTimeError extends Error {
   readonly statusCode = 400;
 }
 
-export type EventTimeResolution =
-  | { ok: true; eventTime: Date; supplied: boolean }
-  | { ok: false; error: string };
+export type EventTimeResolution = { ok: true; eventTime: Date; supplied: boolean } | { ok: false; error: string };
 
 /**
  * The time an event is recorded at.

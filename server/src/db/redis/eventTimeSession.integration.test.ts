@@ -10,7 +10,13 @@ const RETENTION_MS = 15 * 24 * 60 * 60 * 1000;
 const MINUTE = 60 * 1000;
 
 interface EventTimeMockRedis {
-  eventTimeSession(key: string, candidateId: string, eventMs: number, gapMs: number, retentionMs: number): Promise<string>;
+  eventTimeSession(
+    key: string,
+    candidateId: string,
+    eventMs: number,
+    gapMs: number,
+    retentionMs: number
+  ): Promise<string>;
   claimEventId(key: string, retentionMs: number): Promise<number>;
   get(key: string): Promise<string | null>;
   del(key: string): Promise<number>;

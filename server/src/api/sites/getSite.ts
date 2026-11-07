@@ -52,10 +52,7 @@ export async function getSite(request: FastifyRequest<GetSiteParams>, reply: Fas
     }
 
     // The caller's role on the site; null for public and private-link viewers.
-    const [role, requiresPlan] = await Promise.all([
-      getUserSiteRole(request, site.siteId),
-      getSiteRequiresPlan(site),
-    ]);
+    const [role, requiresPlan] = await Promise.all([getUserSiteRole(request, site.siteId), getSiteRequiresPlan(site)]);
     // sp3n/rybbit fork: replay and web vitals are web-only; game and mobile sites never report them.
     const sessionReplay =
       site.type && site.type !== "web" ? false : site.sessionReplay && !usageService.isSiteWithoutReplay(site.siteId);
