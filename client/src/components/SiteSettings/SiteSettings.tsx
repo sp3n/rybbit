@@ -19,7 +19,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogClose, DialogContent, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Switch } from "@/components/ui/switch";
 import { toast } from "@/components/ui/sonner";
-import { authClient } from "@/lib/auth";
+import { useSitePermissions } from "@/hooks/usePermissions";
 import { cn } from "@/lib/utils";
 
 import { ScriptBuilder } from "./ScriptBuilder";
@@ -32,19 +32,50 @@ import { EmbedTab } from "./EmbedTab";
 import { DashboardEmbedTab } from "./DashboardEmbedTab";
 import { UsageTab } from "./UsageTab";
 import { useGetSite } from "../../api/admin/hooks/useSites";
-import { useUserOrganizations } from "../../api/admin/hooks/useOrganizations";
 import { useGetSitesFromOrg } from "../../api/admin/hooks/useSites";
 import { SiteResponse, updateSiteConfig } from "../../api/admin/endpoints";
 import { IS_CLOUD } from "../../lib/const";
 
-export function SiteSettings({ siteId, trigger }: { siteId: number; trigger?: React.ReactNode }) {
-  const { data: siteMetadata, isLoading, error } = useGetSite(siteId);
+interface SiteSettingsProps {
+  siteId: number;
+  trigger?: React.ReactNode;
+  lazy?: boolean;
+  adminOrganization?: {
+    id: string;
+    subscription: { planName: string; eventLimit?: number };
+  };
+}
 
-  if (isLoading || !siteMetadata || error) {
+export function SiteSettings({ siteId, trigger, adminOrganization, lazy = false }: SiteSettingsProps) {
+  const [loadRequested, setLoadRequested] = useState(!lazy);
+  const { data: siteMetadata, isLoading, error } = useGetSite(siteId, { enabled: loadRequested });
+
+  const defaultTrigger = trigger ?? (
+    <Button variant="ghost" size="icon">
+      <Settings className="h-4 w-4" />
+    </Button>
+  );
+
+  if (!loadRequested || isLoading) {
+    return (
+      <span className="contents" onClick={() => setLoadRequested(true)}>
+        {defaultTrigger}
+      </span>
+    );
+  }
+
+  if (!siteMetadata || error) {
     return null;
   }
 
-  return <SiteSettingsInner siteMetadata={siteMetadata} trigger={trigger} />;
+  return (
+    <SiteSettingsInner
+      siteMetadata={siteMetadata}
+      trigger={trigger}
+      adminOrganization={adminOrganization}
+      initialOpen={lazy}
+    />
+  );
 }
 
 type TabKey =
@@ -58,19 +89,31 @@ type TabKey =
   | "dashboard-embed"
   | "usage";
 
-function SiteSettingsInner({ siteMetadata, trigger }: { siteMetadata: SiteResponse; trigger?: React.ReactNode }) {
+function SiteSettingsInner({
+  siteMetadata,
+  trigger,
+  adminOrganization,
+  initialOpen = false,
+}: {
+  siteMetadata: SiteResponse;
+  trigger?: React.ReactNode;
+  adminOrganization?: SiteSettingsProps["adminOrganization"];
+  initialOpen?: boolean;
+}) {
   const t = useExtracted();
-  const { data: session } = authClient.useSession();
-  const { data: userOrganizationsData } = useUserOrganizations();
-  const siteOrgMembership = userOrganizationsData?.find(org => org.id === siteMetadata.organizationId);
-  const disabled = session?.user.role !== "admin" && (!siteOrgMembership?.role || siteOrgMembership.role === "member");
+  // What the viewer may change here. Controls they can't use stay visible but disabled.
+  const { can } = useSitePermissions(siteMetadata.siteId);
+  const canConfigure = can("sites:configure");
 
-  const [dialogOpen, setDialogOpen] = useState(false);
+  const [dialogOpen, setDialogOpen] = useState(initialOpen);
   const [activeTab, setActiveTab] = useState<TabKey>("general");
   const [embedEnabled, setEmbedEnabled] = useState(!!siteMetadata.embedEnabled);
   const [togglingEmbed, setTogglingEmbed] = useState(false);
   const [sitePublic, setSitePublic] = useState(!!siteMetadata.public);
-  const { refetch: refetchOrgSites } = useGetSitesFromOrg(siteMetadata?.organizationId ?? "");
+  const adminMode = !!adminOrganization;
+  const { refetch: refetchOrgSites } = useGetSitesFromOrg(siteMetadata?.organizationId ?? "", {
+    enabled: !adminMode,
+  });
 
   useEffect(() => {
     setEmbedEnabled(!!siteMetadata.embedEnabled);
@@ -84,7 +127,9 @@ function SiteSettingsInner({ siteMetadata, trigger }: { siteMetadata: SiteRespon
         await updateSiteConfig(siteMetadata.siteId, { embedEnabled: checked });
         setEmbedEnabled(checked);
         toast.success(checked ? t("Embed widget enabled") : t("Embed widget disabled"));
-        refetchOrgSites();
+        if (!adminMode) {
+          refetchOrgSites();
+        }
       } catch (error) {
         console.error("Error toggling embed:", error);
         toast.error(t("Failed to update embed setting"));
@@ -92,7 +137,7 @@ function SiteSettingsInner({ siteMetadata, trigger }: { siteMetadata: SiteRespon
         setTogglingEmbed(false);
       }
     },
-    [siteMetadata.siteId, refetchOrgSites, t]
+    [siteMetadata.siteId, refetchOrgSites, t, adminMode]
   );
 
   if (!siteMetadata) {
@@ -172,32 +217,51 @@ function SiteSettingsInner({ siteMetadata, trigger }: { siteMetadata: SiteRespon
                   <Switch
                     aria-label={t("Enable Embed Widget")}
                     checked={embedEnabled}
-                    disabled={togglingEmbed}
+                    disabled={togglingEmbed || !canConfigure}
                     onCheckedChange={handleToggleEmbed}
                   />
                 </label>
               )}
             </header>
             <div className="flex-1 overflow-y-auto px-6 py-5">
+              {!canConfigure && activeTab !== "script" && activeTab !== "usage" && (
+                <p className="mb-4 rounded-md border border-neutral-200 px-3 py-2 text-xs text-muted-foreground dark:border-neutral-800">
+                  {t("You can view these settings, but your role can't change them.")}
+                </p>
+              )}
               {activeTab === "general" && (
                 <GeneralTab
                   siteMetadata={currentSiteMetadata}
-                  disabled={disabled}
+                  disabled={!canConfigure}
+                  canDelete={can("sites:delete")}
+                  canTransfer={can("sites:transfer")}
                   onClose={() => setDialogOpen(false)}
                   onPublicChange={setSitePublic}
+                  adminMode={adminMode}
                 />
               )}
-              {activeTab === "tracking" && <TrackingTab siteMetadata={currentSiteMetadata} disabled={disabled} />}
-              {activeTab === "exclusions" && <ExclusionsTab siteId={siteMetadata.siteId} disabled={disabled} />}
-              {activeTab === "integrations" && IS_CLOUD && <IntegrationsTab disabled={disabled} />}
+              {activeTab === "tracking" && (
+                <TrackingTab
+                  siteMetadata={currentSiteMetadata}
+                  disabled={!canConfigure}
+                  adminMode={adminMode}
+                  adminSubscription={adminOrganization?.subscription}
+                />
+              )}
+              {activeTab === "exclusions" && <ExclusionsTab siteId={siteMetadata.siteId} disabled={!canConfigure} />}
+              {activeTab === "integrations" && IS_CLOUD && (
+                <IntegrationsTab disabled={!can("gsc:write")} siteId={siteMetadata.siteId} />
+              )}
               {activeTab === "script" && <ScriptBuilder siteMetadata={currentSiteMetadata} />}
               {activeTab === "widget-embeds" && (
                 <EmbedTab siteMetadata={currentSiteMetadata} embedEnabled={embedEnabled} />
               )}
               {activeTab === "dashboard-embed" && (
-                <DashboardEmbedTab siteMetadata={currentSiteMetadata} disabled={disabled} />
+                <DashboardEmbedTab siteMetadata={currentSiteMetadata} disabled={!canConfigure} />
               )}
-              {activeTab === "import" && <ImportManager siteId={siteMetadata.siteId} disabled={disabled} />}
+              {activeTab === "import" && (
+                <ImportManager siteId={siteMetadata.siteId} disabled={!can("imports:write")} />
+              )}
               {activeTab === "usage" && <UsageTab siteId={siteMetadata.siteId} />}
             </div>
           </main>

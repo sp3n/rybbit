@@ -1,5 +1,14 @@
 // Admin
+export { deleteAdminApiKey, getAdminApiKeys, updateAdminApiKey } from "./adminApiKeys.js";
 export { adminMoveSite } from "./adminMoveSite.js";
+export {
+  deleteAdminOrganizationMember,
+  getAdminOrganizationMember,
+  getAdminOrganizationOptions,
+  getAdminSubscriptionPlans,
+  updateAdminOrganizationMember,
+  updateAdminSubscriptionOverride,
+} from "./adminOrganizationManagement.js";
 export { collectTelemetry } from "./collectTelemetry.js";
 export { getAdminOrganizations } from "./getAdminOrganizations.js";
 export { getAdminServiceEventCount } from "./getAdminServiceEventCount.js";

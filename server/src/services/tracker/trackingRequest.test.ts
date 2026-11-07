@@ -1,5 +1,5 @@
 import type { FastifyRequest } from "fastify";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ValidatedTrackingPayload } from "./trackingPayload.js";
 
 const mocks = vi.hoisted(() => ({
@@ -27,6 +27,8 @@ vi.mock("../../db/geolocation/asn.js", async importOriginal => {
   };
 });
 
+import { EventTimeError } from "./eventTime.js";
+import { RateLimitedIngestError, UntrustedBearerError } from "./ingestErrors.js";
 import { resolveTrackingRequest } from "./trackingRequest.js";
 
 const site = {
@@ -145,5 +147,167 @@ describe("resolveTrackingRequest", () => {
     );
 
     expect(resolved!.ipAddress).toBe("198.51.100.20");
+  });
+});
+
+// sp3n/rybbit fork: a trusted bridge supplies each event's own time and id.
+describe("resolveTrackingRequest event time and id", () => {
+  const trusted = () => mocks.checkApiKey.mockResolvedValue({ valid: true, statements: { ingest: ["write"] } });
+  const bearer = () => request({ authorization: "Bearer sk_test" });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-11-07T12:00:00.000Z"));
+    mocks.getConfig.mockResolvedValue(site);
+    mocks.lookupAsn.mockReturnValue(null);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("records a trusted caller's event time instead of the arrival time", async () => {
+    trusted();
+
+    const resolved = await resolveTrackingRequest(
+      bearer(),
+      payload({ timestamp: "2026-11-07T10:15:30.250Z", event_id: "env-1" })
+    );
+
+    expect(resolved!.receivedAt.toISOString()).toBe("2026-11-07T10:15:30.250Z");
+    expect(resolved!.eventTimeSupplied).toBe(true);
+    expect(resolved!.eventId).toBe("env-1");
+  });
+
+  it("ignores an untrusted caller's timestamp and event id", async () => {
+    const resolved = await resolveTrackingRequest(
+      request({}),
+      payload({ timestamp: "2026-11-01T00:00:00.000Z", event_id: "env-1" })
+    );
+
+    expect(resolved!.receivedAt.toISOString()).toBe("2026-11-07T12:00:00.000Z");
+    expect(resolved!.eventTimeSupplied).toBe(false);
+    expect(resolved!.eventId).toBeUndefined();
+  });
+
+  it("refuses trusted fields from a bearer without ingest:write, rather than degrading it", async () => {
+    mocks.checkApiKey.mockResolvedValue({ valid: true, statements: { site: ["read"] } });
+
+    await expect(
+      resolveTrackingRequest(bearer(), payload({ timestamp: "2026-11-01T00:00:00.000Z" }))
+    ).rejects.toBeInstanceOf(UntrustedBearerError);
+  });
+
+  it("refuses trusted fields from a revoked key", async () => {
+    mocks.checkApiKey.mockResolvedValue({ valid: false, statements: null });
+
+    await expect(resolveTrackingRequest(bearer(), payload({ event_id: "env-1" }))).rejects.toBeInstanceOf(
+      UntrustedBearerError
+    );
+  });
+
+  it("still degrades a plain event from an under-scoped bearer, as upstream does", async () => {
+    mocks.checkApiKey.mockResolvedValue({ valid: true, statements: { site: ["read"] } });
+
+    const resolved = await resolveTrackingRequest(bearer(), payload());
+
+    expect(resolved!.trustedServerSideIngestion).toBe(false);
+  });
+
+  it("refuses a trusted timestamp out of bounds", async () => {
+    trusted();
+
+    await expect(
+      resolveTrackingRequest(bearer(), payload({ timestamp: "2026-11-07T12:10:00.000Z" }))
+    ).rejects.toBeInstanceOf(EventTimeError);
+    await expect(
+      resolveTrackingRequest(bearer(), payload({ timestamp: "2026-10-22T11:59:00.000Z" }))
+    ).rejects.toBeInstanceOf(EventTimeError);
+  });
+
+  it("keeps the arrival time when a trusted caller sends no timestamp", async () => {
+    trusted();
+
+    const resolved = await resolveTrackingRequest(bearer(), payload());
+
+    expect(resolved!.receivedAt.toISOString()).toBe("2026-11-07T12:00:00.000Z");
+    expect(resolved!.eventTimeSupplied).toBe(false);
+  });
+});
+
+// sp3n/rybbit fork: a trusted bridge's geography (geoOverride.ts).
+describe("resolveTrackingRequest geography override", () => {
+  const geo = {
+    country: "GB",
+    region: "ENG",
+    city: "London",
+    latitude: 51.51,
+    longitude: -0.13,
+    timezone: "Europe/London",
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.getConfig.mockResolvedValue(site);
+    mocks.lookupAsn.mockReturnValue(null);
+  });
+
+  it("keeps a trusted caller's geography alongside its forwarded IP", async () => {
+    mocks.checkApiKey.mockResolvedValue({ valid: true, statements: { ingest: ["write"] } });
+
+    const resolved = await resolveTrackingRequest(
+      request({ authorization: "Bearer sk_test" }),
+      payload({ ip_address: "203.0.113.10", geo })
+    );
+
+    expect(resolved!.geoOverride).toEqual(geo);
+    expect(resolved!.ipAddress).toBe("203.0.113.10");
+  });
+
+  it("ignores an untrusted caller's geography", async () => {
+    const resolved = await resolveTrackingRequest(request({}), payload({ geo }));
+
+    expect(resolved!.geoOverride).toBeUndefined();
+  });
+
+  it("refuses the geography of a bearer without ingest:write", async () => {
+    mocks.checkApiKey.mockResolvedValue({ valid: true, statements: { site: ["read"] } });
+
+    await expect(
+      resolveTrackingRequest(request({ authorization: "Bearer sk_test" }), payload({ geo }))
+    ).rejects.toBeInstanceOf(UntrustedBearerError);
+  });
+});
+
+// sp3n/rybbit fork: a rate-limited bridge is told to back off, not downgraded.
+describe("resolveTrackingRequest with a rate-limited bearer", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.getConfig.mockResolvedValue(site);
+    mocks.lookupAsn.mockReturnValue(null);
+    mocks.checkApiKey.mockResolvedValue({
+      valid: false,
+      role: null,
+      rateLimited: true,
+      rateLimit: { retryAfterSeconds: 12 },
+      statements: null,
+    });
+  });
+
+  it("answers 429 when the request carries trusted-only fields", async () => {
+    const attempt = resolveTrackingRequest(
+      request({ authorization: "Bearer sk_test" }),
+      payload({ timestamp: new Date().toISOString(), event_id: "env-1" })
+    );
+
+    await expect(attempt).rejects.toBeInstanceOf(RateLimitedIngestError);
+    await expect(attempt).rejects.toMatchObject({ statusCode: 429, retryAfterSeconds: 12 });
+  });
+
+  it("keeps the previous behaviour for a plain event: untrusted, not refused", async () => {
+    const resolved = await resolveTrackingRequest(request({ authorization: "Bearer sk_test" }), payload());
+
+    expect(resolved!.trustedServerSideIngestion).toBe(false);
   });
 });

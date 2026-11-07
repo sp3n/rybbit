@@ -11,20 +11,11 @@ import {
 } from "@/components/ui/basic-tabs";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { useSubdivisions } from "@/lib/geo";
+import { parseCityValue, useGetRegionName } from "@/lib/geo";
 import { getCountryName, getLanguageName } from "@/lib/utils";
 import { RollupSection } from "./RollupSection";
 
 type Tab = "countries" | "regions" | "cities" | "languages" | "timezones";
-
-function getCountryCity(value: string) {
-  if (value.split("-").length === 2) {
-    const [country, city] = value.split("-");
-    return { country, region: "", city };
-  }
-  const [country, region, city] = value.split("-");
-  return { country, region, city };
-}
 
 const getCountryFromLanguage = (languageCode: string): string | null => {
   if (languageCode.includes("-")) {
@@ -39,7 +30,7 @@ export function Countries({ siteIds }: { siteIds: number[] }) {
   const [expanded, setExpanded] = useState(false);
   const t = useExtracted();
   const close = () => setExpanded(false);
-  const { data: subdivisions } = useSubdivisions();
+  const { getRegionName } = useGetRegionName();
 
   return (
     <Card className="h-[405px]">
@@ -88,24 +79,16 @@ export function Countries({ siteIds }: { siteIds: number[] }) {
               title={t("Regions")}
               getKey={(e) => e.value}
               getValue={(e) => e.value}
-              getFilterLabel={(e) => {
-                const region = subdivisions?.features.find(
-                  (f) => f.properties.iso_3166_2 === e.value
-                )?.properties;
-                return region?.name ?? "";
-              }}
+              getFilterLabel={(e) => getRegionName(e.value)}
               getLabel={(e) => {
                 if (!e.value) return t("Unknown");
-                const region = subdivisions?.features.find(
-                  (f) => f.properties.iso_3166_2 === e.value
-                )?.properties;
                 const countryCode = e.value.split("-")[0];
                 return (
                   <div className="flex gap-2 items-center">
                     <CountryFlag country={countryCode} />
                     {countryCode}
                     <ChevronRight className="w-4 h-4 mx-[-4px]" />
-                    {region?.name ?? e.value.slice(3)}
+                    {getRegionName(e.value) || e.value.slice(3)}
                   </div>
                 );
               }}
@@ -122,18 +105,16 @@ export function Countries({ siteIds }: { siteIds: number[] }) {
               getValue={(e) => e.value}
               getLabel={(e) => {
                 if (!e.value || e.value === "-") return t("Unknown");
-                const { country, region, city } = getCountryCity(e.value) ?? {};
-                const region_ = subdivisions?.features.find(
-                  (f) => f.properties.iso_3166_2 === `${country}-${region}`
-                )?.properties;
+                const { country, region, city } = parseCityValue(e.value);
+                const regionName = getRegionName(`${country}-${region}`);
                 return (
                   <div className="flex gap-2 items-center">
                     <CountryFlag country={country} />
                     {country}
-                    {region_?.name && (
+                    {regionName && (
                       <ChevronRight className="w-4 h-4 mx-[-4px]" />
                     )}
-                    {region_?.name}
+                    {regionName}
                     {city && <ChevronRight className="w-4 h-4 mx-[-4px]" />}
                     {city}
                   </div>

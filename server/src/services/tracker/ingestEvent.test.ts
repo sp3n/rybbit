@@ -9,17 +9,22 @@ const mocks = vi.hoisted(() => ({
   checkBotBlocking: vi.fn(),
   decideSiteExclusion: vi.fn(),
   isSiteOverLimit: vi.fn(),
+  isSiteWithoutPlan: vi.fn(),
   updateSession: vi.fn(),
   generateUserId: vi.fn(),
   generateUserIdFromClientId: vi.fn(),
+  claimEvent: vi.fn(),
+  releaseClaim: vi.fn(),
+  completeClaim: vi.fn(),
+  addDurable: vi.fn(),
 }));
 
 vi.mock("../usageService.js", () => ({
-  usageService: { isSiteOverLimit: mocks.isSiteOverLimit },
+  usageService: { isSiteOverLimit: mocks.isSiteOverLimit, isSiteWithoutPlan: mocks.isSiteWithoutPlan },
 }));
 
 vi.mock("./pageviewQueue.js", () => ({
-  pageviewQueue: { add: mocks.addPageview },
+  pageviewQueue: { add: mocks.addPageview, addDurable: mocks.addDurable },
 }));
 
 vi.mock("../sessions/sessionsService.js", () => ({
@@ -46,7 +51,12 @@ vi.mock("../userId/userIdService.js", () => ({
   },
 }));
 
+vi.mock("./eventDedupe.js", () => ({
+  claimEvent: mocks.claimEvent,
+}));
+
 import { ingestEvent } from "./ingestEvent.js";
+import { PermanentIngestError, RetryableIngestError } from "./ingestErrors.js";
 
 const site = {
   id: "site_abc",
@@ -83,6 +93,7 @@ function trackingRequest(overrides: Partial<TrackingRequest> = {}): TrackingRequ
     headers: { "user-agent": "Mozilla/5.0" },
     lookupAsn,
     receivedAt: new Date("2026-08-14T10:38:37.000Z"),
+    eventTimeSupplied: false,
     ...overrides,
   };
 }
@@ -92,10 +103,17 @@ describe("ingestEvent", () => {
     vi.clearAllMocks();
     mocks.decideSiteExclusion.mockResolvedValue({ excluded: false });
     mocks.isSiteOverLimit.mockReturnValue(false);
+    mocks.isSiteWithoutPlan.mockReturnValue(false);
     mocks.checkBotBlocking.mockResolvedValue(null);
     mocks.updateSession.mockResolvedValue({ sessionId: "session-alice" });
     mocks.generateUserId.mockResolvedValue("shared-fingerprint");
     mocks.addPageview.mockResolvedValue(undefined);
+    mocks.claimEvent.mockResolvedValue({
+      duplicate: false,
+      release: mocks.releaseClaim,
+      complete: mocks.completeClaim,
+    });
+    mocks.addDurable.mockResolvedValue(undefined);
   });
 
   it("queues an accepted event with its session and resolved identity", async () => {
@@ -175,6 +193,23 @@ describe("ingestEvent", () => {
     });
   });
 
+  it("matches exclusions against the whole URL, and stores it cut to the column limits", async () => {
+    // A query string cut first would lose `preview` and slip past its exclusion.
+    const querystring = `?padding=${"x".repeat(2050)}&preview=1`;
+    const pathname = `/${"p".repeat(3000)}`;
+
+    await ingestEvent(
+      trackingRequest({
+        payload: { type: "pageview", site_id: "site_abc", pathname, querystring } as TrackingRequest["payload"],
+      })
+    );
+
+    expect(mocks.decideSiteExclusion).toHaveBeenCalledWith(site, expect.objectContaining({ pathname, querystring }));
+    expect(mocks.addPageview).toHaveBeenCalledWith(
+      expect.objectContaining({ pathname: pathname.slice(0, 2048), querystring: querystring.slice(0, 2048) })
+    );
+  });
+
   // The ordering fix: exclusion used to run *after* bot detection, so a Site
   // owner's own excluded office IP still drove every anomaly counter.
   it("decides exclusion before bot detection, so excluded traffic leaves no trace", async () => {
@@ -205,6 +240,17 @@ describe("ingestEvent", () => {
 
     expect(outcome).toEqual({ status: "over_limit" });
     expect(mocks.checkBotBlocking).not.toHaveBeenCalled();
+    expect(mocks.addPageview).not.toHaveBeenCalled();
+  });
+
+  it("drops every event for a site whose organization has no plan", async () => {
+    mocks.isSiteWithoutPlan.mockReturnValue(true);
+
+    const outcome = await ingestEvent(trackingRequest());
+
+    expect(outcome).toEqual({ status: "no_plan" });
+    expect(mocks.checkBotBlocking).not.toHaveBeenCalled();
+    expect(mocks.generateUserId).not.toHaveBeenCalled();
     expect(mocks.addPageview).not.toHaveBeenCalled();
   });
 
@@ -302,5 +348,170 @@ describe("ingestEvent", () => {
       // The event's own instant decides its salt day, not the clock at hash time.
       receivedAt: new Date("2026-08-14T10:38:37.000Z"),
     });
+  });
+});
+
+// sp3n/rybbit fork: a trusted bridge's event time and redelivery.
+describe("ingestEvent event time and dedupe", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.decideSiteExclusion.mockResolvedValue({ excluded: false });
+    mocks.isSiteOverLimit.mockReturnValue(false);
+    mocks.isSiteWithoutPlan.mockReturnValue(false);
+    mocks.checkBotBlocking.mockResolvedValue(null);
+    mocks.updateSession.mockResolvedValue({ sessionId: "session-alice" });
+    mocks.generateUserId.mockResolvedValue("shared-fingerprint");
+    mocks.addPageview.mockResolvedValue(undefined);
+    mocks.claimEvent.mockResolvedValue({
+      duplicate: false,
+      release: mocks.releaseClaim,
+      complete: mocks.completeClaim,
+    });
+    mocks.addDurable.mockResolvedValue(undefined);
+  });
+
+  const replayed = () =>
+    trackingRequest({
+      trustedServerSideIngestion: true,
+      receivedAt: new Date("2026-11-07T08:15:00.250Z"),
+      eventTimeSupplied: true,
+      eventId: "env-1",
+      payload: {
+        type: "custom_event",
+        site_id: "site_abc",
+        event_name: "level_start",
+        user_id: "player-7",
+      } as TrackingRequest["payload"],
+    });
+
+  it("stores a supplied event time and sessions it by event time", async () => {
+    await ingestEvent(replayed());
+
+    expect(mocks.updateSession).toHaveBeenCalledWith(
+      expect.objectContaining({ identifiedUserOnly: true, eventTimeMs: Date.parse("2026-11-07T08:15:00.250Z") })
+    );
+    expect(mocks.addDurable).toHaveBeenCalledWith(expect.objectContaining({ timestamp: "2026-11-07T08:15:00.250Z" }));
+    expect(mocks.addPageview).not.toHaveBeenCalled();
+  });
+
+  it("sessions by arrival when no event time was supplied", async () => {
+    await ingestEvent(trackingRequest());
+
+    expect(mocks.updateSession).toHaveBeenCalledWith(expect.objectContaining({ eventTimeMs: undefined }));
+  });
+
+  it("claims the event id for the site", async () => {
+    await ingestEvent(replayed());
+
+    expect(mocks.claimEvent).toHaveBeenCalledWith(42, "env-1");
+  });
+
+  it("drops a redelivered event before any other work", async () => {
+    mocks.claimEvent.mockResolvedValue({ duplicate: true });
+
+    expect(await ingestEvent(replayed())).toEqual({ status: "duplicate" });
+    expect(mocks.decideSiteExclusion).not.toHaveBeenCalled();
+    expect(mocks.updateSession).not.toHaveBeenCalled();
+    expect(mocks.addPageview).not.toHaveBeenCalled();
+  });
+
+  it("gives the claim back and asks for a retry when the event is not stored", async () => {
+    mocks.addDurable.mockRejectedValue(new Error("clickhouse down"));
+
+    await expect(ingestEvent(replayed())).rejects.toBeInstanceOf(RetryableIngestError);
+    expect(mocks.releaseClaim).toHaveBeenCalledOnce();
+    expect(mocks.completeClaim).not.toHaveBeenCalled();
+  });
+
+  it("marks the claim done only after the event is stored", async () => {
+    let stored: () => void = () => {};
+    mocks.addDurable.mockReturnValue(new Promise<void>(resolve => (stored = resolve)));
+
+    const pending = ingestEvent(replayed());
+    await vi.waitFor(() => expect(mocks.addDurable).toHaveBeenCalled());
+    expect(mocks.completeClaim).not.toHaveBeenCalled();
+
+    stored();
+    await pending;
+    expect(mocks.completeClaim).toHaveBeenCalledOnce();
+    expect(mocks.releaseClaim).not.toHaveBeenCalled();
+  });
+
+  it("lets a retriable claim failure through without recording", async () => {
+    mocks.claimEvent.mockRejectedValue(new RetryableIngestError("another delivery of this event is being recorded"));
+
+    await expect(ingestEvent(replayed())).rejects.toBeInstanceOf(RetryableIngestError);
+    expect(mocks.addDurable).not.toHaveBeenCalled();
+  });
+
+  it("asks for a retry after the bounded wait, and settles the claim when the insert does", async () => {
+    vi.useFakeTimers();
+    try {
+      let stored: () => void = () => {};
+      mocks.addDurable.mockReturnValue(new Promise<void>(resolve => (stored = resolve)));
+
+      const attempt = ingestEvent(replayed());
+      const outcome = attempt.then(
+        () => "acknowledged",
+        error => error
+      );
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      expect(await outcome).toBeInstanceOf(RetryableIngestError);
+      expect(mocks.completeClaim).not.toHaveBeenCalled();
+      expect(mocks.releaseClaim).not.toHaveBeenCalled();
+
+      stored();
+      await vi.waitFor(() => expect(mocks.completeClaim).toHaveBeenCalledOnce());
+      expect(mocks.releaseClaim).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("passes a refused row through as permanent, and releases the claim", async () => {
+    mocks.addDurable.mockRejectedValue(new PermanentIngestError("ClickHouse refused the event (27)"));
+
+    await expect(ingestEvent(replayed())).rejects.toBeInstanceOf(PermanentIngestError);
+    expect(mocks.releaseClaim).toHaveBeenCalledOnce();
+  });
+
+  it("does not wait for ClickHouse when there is no event id", async () => {
+    await ingestEvent(trackingRequest());
+
+    expect(mocks.addPageview).toHaveBeenCalledOnce();
+    expect(mocks.addDurable).not.toHaveBeenCalled();
+  });
+});
+
+// sp3n/rybbit fork: the stored country decides country exclusions too.
+describe("ingestEvent geography override", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.decideSiteExclusion.mockResolvedValue({ excluded: false });
+    mocks.isSiteOverLimit.mockReturnValue(false);
+    mocks.isSiteWithoutPlan.mockReturnValue(false);
+    mocks.checkBotBlocking.mockResolvedValue(null);
+    mocks.updateSession.mockResolvedValue({ sessionId: "session-alice" });
+    mocks.generateUserId.mockResolvedValue("shared-fingerprint");
+    mocks.addPageview.mockResolvedValue(undefined);
+    mocks.claimEvent.mockResolvedValue({
+      duplicate: false,
+      release: mocks.releaseClaim,
+      complete: mocks.completeClaim,
+    });
+    mocks.addDurable.mockResolvedValue(undefined);
+  });
+
+  it("passes a trusted country to exclusions and the geography to the queue", async () => {
+    const geo = { country: "gb", city: "London" };
+
+    await ingestEvent(trackingRequest({ trustedServerSideIngestion: true, geoOverride: geo }));
+
+    expect(mocks.decideSiteExclusion).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ countryOverride: "GB" })
+    );
+    expect(mocks.addPageview).toHaveBeenCalledWith(expect.objectContaining({ geoOverride: geo }));
   });
 });

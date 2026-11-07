@@ -3,11 +3,9 @@ import { FastifyReply, FastifyRequest } from "fastify";
 import { eq, and } from "drizzle-orm";
 import { db } from "../../../db/postgres/postgres.js";
 import { userProfiles, userAliases } from "../../../db/postgres/schema.js";
-import { getFilterStatement } from "../utils/getFilterStatement.js";
 import { SESSION_CHANNEL_AGG, SESSION_REFERRER_AGG } from "../utils/sessionAttribution.js";
-import { getTimeStatement } from "../utils/timeWindow.js";
-import { matchesUser } from "../utils/effectiveUserId.js";
 import { runAnalyticsQuery } from "../utils/analyticsQuery.js";
+import { buildUserEventScope } from "./userEventScope.js";
 
 interface UserPageviewData {
   sessions: number;
@@ -86,27 +84,11 @@ export interface UserInfoResponse {
 }
 
 export const buildUserInfoQueries = (query: FilterParams, siteId: number) => {
-  // Optional time range + dimension filters; both empty when the page is on
-  // all-time with no filters, which keeps the original full-history behavior.
-  const timeStatement = getTimeStatement(query);
-  const filterStatement = getFilterStatement(query.filters, siteId, timeStatement);
-
-  // Filters run in a subquery below each aggregation: the aggregate SELECTs
-  // alias argMax(...) to the same names as raw columns (browser_version, …),
-  // and ClickHouse resolves unqualified WHERE references at that level to the
-  // aliases, throwing ILLEGAL_AGGREGATION.
-  const scopedEvents = `(
-        SELECT *
-        FROM events
-        WHERE
-            ${matchesUser("{userId:String}", "events")}
-            AND site_id = {site:Int32}
-            ${timeStatement}
-            ${filterStatement}
-    ) AS events`;
+  const { filteredSessionsCTE, withFilteredSessions, scopedEvents } = buildUserEventScope(query, siteId);
 
   const sessionsQuery = `
-    WITH sessions AS (
+    WITH ${filteredSessionsCTE ? `${filteredSessionsCTE},` : ""}
+    sessions AS (
         SELECT
             session_id,
             argMax(user_id, timestamp) AS user_id,
@@ -131,8 +113,8 @@ export const buildUserInfoQueries = (query: FilterParams, siteId: number) => {
             MAX(timestamp) AS session_end,
             MIN(timestamp) AS session_start,
             dateDiff('second', MIN(timestamp), MAX(timestamp)) AS session_duration,
-            argMinIf(pathname, timestamp, type = 'pageview') AS entry_page,
-            argMaxIf(pathname, timestamp, type = 'pageview') AS exit_page,
+            argMinIf(pathname, timestamp_ms, type = 'pageview') AS entry_page,
+            argMaxIf(pathname, timestamp_ms, type = 'pageview') AS exit_page,
             countIf(type = 'pageview') AS pageviews,
             countIf(type = 'custom_event') AS events,
             argMax(ip, timestamp) AS ip
@@ -174,12 +156,16 @@ export const buildUserInfoQueries = (query: FilterParams, siteId: number) => {
         argMaxIf(user_timezone, session_end, user_timezone != '') AS timezone
     FROM
         sessions
+    -- An aggregate without GROUP BY returns one all-default row for no input;
+    -- return none, so an unknown user 404s and a claimed device follows its alias.
+    HAVING count() > 0
       `;
 
   // p75 Web Vitals across every performance event this user produced.
   // Separate query: the sessions CTE collapses rows per session, which
   // would turn an event-level quantile into a quantile of session picks.
   const vitalsQuery = `
+    ${withFilteredSessions}
     SELECT
         quantile(0.75)(lcp) AS lcp_p75,
         quantile(0.75)(cls) AS cls_p75,
@@ -194,6 +180,7 @@ export const buildUserInfoQueries = (query: FilterParams, siteId: number) => {
   // Every location this user was seen in, by session share. A session that
   // moves between cities counts once per city, so shares are approximate.
   const locationsQuery = `
+    ${withFilteredSessions}
     SELECT
         country,
         region,
@@ -213,6 +200,7 @@ export const buildUserInfoQueries = (query: FilterParams, siteId: number) => {
   // browser update doesn't split one physical device into many rows;
   // versions and screen are argMax'd to the latest sighting instead.
   const devicesQuery = `
+    ${withFilteredSessions}
     SELECT
         device_type,
         browser,

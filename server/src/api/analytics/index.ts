@@ -4,6 +4,9 @@ export { getAutocaptureValues } from "./events/getAutocaptureValues.js";
 export { getEventBucketed } from "./events/getEventBucketed.js";
 export { getEventNames } from "./events/getEventNames.js";
 export { getEventPropertyMetric } from "./events/getEventPropertyMetric.js";
+export { getEventNameStats } from "./events/getEventNameStats.js";
+export { getEventsOverview } from "./events/getEventsOverview.js";
+export { getSilentEvents } from "./events/getSilentEvents.js";
 export { getEventProperties } from "./events/getEventProperties.js";
 export { getEvents } from "./events/getEvents.js";
 export { getOutboundLinks } from "./events/getOutboundLinks.js";
@@ -14,6 +17,7 @@ export { createFunnel } from "./funnels/createFunnel.js";
 export { deleteFunnel } from "./funnels/deleteFunnel.js";
 export { getFunnel } from "./funnels/getFunnel.js";
 export { getFunnelStepSessions } from "./funnels/getFunnelStepSessions.js";
+export { getFunnelSummaries } from "./funnels/getFunnelSummaries.js";
 export { getFunnels } from "./funnels/getFunnels.js";
 
 // Dashboards
@@ -24,11 +28,21 @@ export { getDashboards } from "./dashboards/getDashboards.js";
 export { updateDashboard } from "./dashboards/updateDashboard.js";
 export { runDashboardCardQuery } from "./runDashboardCardQuery.js";
 
+// Segments
+export { createSegment } from "./segments/createSegment.js";
+export { deleteSegment } from "./segments/deleteSegment.js";
+export { getSegment } from "./segments/getSegment.js";
+export { getSegments } from "./segments/getSegments.js";
+export { updateSegment } from "./segments/updateSegment.js";
+export { expandSegmentParam } from "./segments/expandSegmentParam.js";
+
 // Goals
 export { createGoal } from "./goals/createGoal.js";
 export { deleteGoal } from "./goals/deleteGoal.js";
+export { getGoalPreview } from "./goals/getGoalPreview.js";
 export { getGoals } from "./goals/getGoals.js";
 export { getGoalSessions } from "./goals/getGoalSessions.js";
+export { getGoalsSummary } from "./goals/getGoalsSummary.js";
 export { getGoalTimeSeries } from "./goals/getGoalTimeSeries.js";
 export { updateGoal } from "./goals/updateGoal.js";
 
@@ -38,6 +52,7 @@ export { getPerformanceOverview } from "./performance/getPerformanceOverview.js"
 export { getPerformanceTimeSeries } from "./performance/getPerformanceTimeSeries.js";
 
 // Bots
+export { getBotAiSummary } from "./bots/getBotAiSummary.js";
 export { getBotDimension } from "./bots/getBotDimension.js";
 export { getBotOverview } from "./bots/getBotOverview.js";
 export { getBotTimeSeries } from "./bots/getBotTimeSeries.js";
@@ -54,24 +69,39 @@ export { getErrorEvents } from "./getErrorEvents.js";
 export { getErrorNames } from "./getErrorNames.js";
 export { generateCustomQuery } from "./generateCustomQuery.js";
 export { getJourneys } from "./getJourneys.js";
+export { getJourneySessions } from "./getJourneySessions.js";
+export { getJourneySummary } from "./getJourneySummary.js";
 export { getLiveUsercount } from "./getLiveUsercount.js";
 export { getMetric } from "./getMetric.js";
 export { getOrgEventCount } from "./getOrgEventCount.js";
 export { getOverview } from "./getOverview.js";
 export { getOverviewBucketed } from "./getOverviewBucketed.js";
 export { getOverviewLite } from "./lite/getOverviewLite.js";
+export { getSiteCards, getSiteCardsLite } from "./getSiteCards.js";
 export { getOverviewBucketedLite } from "./lite/getOverviewBucketedLite.js";
 export { getMetricLite } from "./lite/getMetricLite.js";
 export { getPageTitles } from "./getPageTitles.js";
+export { getPages, getPagesSummary, getPageTrends } from "./getPages.js";
 export { getRetention } from "./getRetention.js";
 export { runCustomQuery } from "./runCustomQuery.js";
 export { getSession } from "./sessions/getSession.js";
 export { getSessionLocations } from "./sessions/getSessionLocations.js";
 export { getSessions } from "./sessions/getSessions.js";
+export { getSessionsSummary } from "./sessions/getSessionsSummary.js";
 export { deleteUser } from "./users/deleteUser.js";
+export { getUserGoals, getUserSessionGoals } from "./users/getUserGoals.js";
 export { getUserInfo } from "./users/getUserInfo.js";
+export { getUserSegments } from "./users/getUserSegments.js";
 export { getUserSessionCount } from "./users/getUserSessionCount.js";
+export { getUserSummary } from "./users/getUserSummary.js";
 export { getUsers } from "./users/getUsers.js";
+export { getUsersSummary } from "./users/getUsersSummary.js";
+export { getUserTraitBreakdown } from "./users/getUserTraitBreakdown.js";
 export { getUserTraitKeys, getUserTraitValues, getUserTraitValueUsers } from "./users/getUserTraits.js";
 export { identifyUser } from "./users/identifyUser.js";
 export { updateUserTraits } from "./users/updateUserTraits.js";
+
+export { getAnnotations } from "./annotations/getAnnotations.js";
+export { createAnnotation } from "./annotations/createAnnotation.js";
+export { updateAnnotation } from "./annotations/updateAnnotation.js";
+export { deleteAnnotation } from "./annotations/deleteAnnotation.js";

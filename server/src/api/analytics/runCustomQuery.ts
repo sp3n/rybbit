@@ -1,11 +1,15 @@
 import { FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
-import { clickhouse } from "../../db/clickhouse/clickhouse.js";
-import { getSitesUserHasAccessTo } from "../../lib/auth-utils.js";
-import { MAX_CUSTOM_QUERY_LENGTH, normalizeCustomQuery, validateScopedQuery } from "./utils/customQueryValidation.js";
-
-const MAX_EXECUTION_TIME_SECONDS = 10;
-const MAX_RESULT_ROWS = 1000;
+import { clickhouseQuery } from "../../db/clickhouse/clickhouse.js";
+import { QUERY_USER_LIMITS } from "../../db/clickhouse/queryLimits.js";
+import { isQueryUserIsolated, QUERY_USER_UNAVAILABLE_ERROR, siteScopeHeaders } from "../../db/clickhouse/queryUser.js";
+import { getOrganizationSitesForCaller } from "../../lib/auth-utils.js";
+import {
+  MAX_CUSTOM_QUERY_LENGTH,
+  normalizeCustomQuery,
+  sanitizeClickhouseError,
+  validateScopedQuery,
+} from "./utils/customQueryValidation.js";
 
 const requestBodySchema = z.object({
   query: z.string().trim().min(1).max(MAX_CUSTOM_QUERY_LENGTH),
@@ -33,7 +37,9 @@ export async function runCustomQuery(
     return reply.status(400).send({ error: validationError });
   }
 
-  const userSites = await getSitesUserHasAccessTo(request);
+  // Read fresh: raw event access must not outlive a site move or a revoked
+  // grant by even the few seconds the per-worker cache holds.
+  const userSites = await getOrganizationSitesForCaller(request, request.params.organizationId);
   const accessibleSiteIds = userSites
     .filter(site => site.organizationId === request.params.organizationId)
     .map(site => site.siteId);
@@ -50,6 +56,10 @@ export async function runCustomQuery(
     siteIds = [body.data.siteId];
   }
 
+  if (!(await isQueryUserIsolated())) {
+    return reply.status(503).send({ error: QUERY_USER_UNAVAILABLE_ERROR });
+  }
+
   const query = `
     WITH scoped_events AS (
       SELECT *
@@ -64,19 +74,19 @@ export async function runCustomQuery(
   `;
 
   try {
-    const result = await clickhouse.query({
+    const result = await clickhouseQuery.query({
       query,
       format: "JSONEachRow",
       query_params: {
         siteIds,
-        limit: MAX_RESULT_ROWS,
+        limit: QUERY_USER_LIMITS.maxResultRows,
       },
-      clickhouse_settings: {
-        max_execution_time: MAX_EXECUTION_TIME_SECONDS,
-        max_result_rows: String(MAX_RESULT_ROWS),
-        result_overflow_mode: "break",
-        readonly: "2",
-      },
+      // The rybbit_query row policy only admits rows from these sites, so the
+      // scoped_events CTE isn't the only thing keeping the query in tenant.
+      http_headers: siteScopeHeaders(siteIds),
+      // Execution limits (readonly, max_execution_time, max_memory_usage,
+      // max_result_rows, …) come from the rybbit_query settings profile and are
+      // pinned there with constraints; sending them here would be rejected.
     });
 
     const data = await result.json<Record<string, unknown>>();
@@ -85,13 +95,12 @@ export async function runCustomQuery(
       meta: {
         queryId: result.query_id,
         rowCount: data.length,
-        maxExecutionTimeSeconds: MAX_EXECUTION_TIME_SECONDS,
-        maxRows: MAX_RESULT_ROWS,
+        maxExecutionTimeSeconds: QUERY_USER_LIMITS.maxExecutionTimeSeconds,
+        maxRows: QUERY_USER_LIMITS.maxResultRows,
       },
     });
   } catch (error) {
     request.log.error(error, "Failed to run custom analytics query");
-    const message = error instanceof Error && error.message ? error.message : "Failed to run query";
-    return reply.status(400).send({ error: message });
+    return reply.status(400).send({ error: sanitizeClickhouseError(error) });
   }
 }

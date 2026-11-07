@@ -3,6 +3,13 @@ import { ZodError } from "zod";
 import { createServiceLogger } from "../../lib/logger/logger.js";
 import { ingestEvent } from "./ingestEvent.js";
 import { trackingPayloadSchema } from "./trackingPayload.js";
+import { EventTimeError } from "./eventTime.js";
+import {
+  PermanentIngestError,
+  RateLimitedIngestError,
+  RetryableIngestError,
+  UntrustedBearerError,
+} from "./ingestErrors.js";
 import { resolveTrackingRequest } from "./trackingRequest.js";
 
 const logger = createServiceLogger("track-event");
@@ -29,7 +36,9 @@ export async function trackEvent(request: FastifyRequest, reply: FastifyReply) {
     const trackingRequest = await resolveTrackingRequest(request, validationResult.data);
 
     if (!trackingRequest) {
-      logger.warn({ siteId: validationResult.data.site_id }, "Site not found");
+      // The 404 lifecycle line already logs at warn; deleted sites that still embed
+      // the script would otherwise log a second warn on every event.
+      logger.debug({ siteId: validationResult.data.site_id }, "Site not found");
       return reply.status(404).send({
         success: false,
         error: "Site not found",
@@ -42,6 +51,10 @@ export async function trackEvent(request: FastifyRequest, reply: FastifyReply) {
       return reply.status(200).send("Site over monthly limit, event not tracked");
     }
 
+    if (outcome.status === "no_plan") {
+      return reply.status(200).send("Site has no plan, event not tracked");
+    }
+
     if (outcome.status === "excluded") {
       return reply.status(200).send({
         success: true,
@@ -49,10 +62,32 @@ export async function trackEvent(request: FastifyRequest, reply: FastifyReply) {
       });
     }
 
+    if (outcome.status === "duplicate") {
+      return reply.status(200).send({ success: true, duplicate: true });
+    }
+
     return reply.status(200).send({
       success: true,
     });
   } catch (error) {
+    if (error instanceof RetryableIngestError || error instanceof RateLimitedIngestError) {
+      logger.warn({ err: error }, "Asking a trusted caller to retry");
+      return reply
+        .status(error.statusCode)
+        .header("retry-after", String(error.retryAfterSeconds))
+        .send({ success: false, error: error.message, retryable: true });
+    }
+    if (error instanceof UntrustedBearerError) {
+      logger.warn("A bearer without ingest:write sent trusted fields");
+      return reply.status(403).send({ success: false, error: error.message });
+    }
+    if (error instanceof PermanentIngestError) {
+      logger.warn({ err: error }, "A trusted event cannot be stored");
+      return reply.status(422).send({ success: false, error: error.message, retryable: false });
+    }
+    if (error instanceof EventTimeError) {
+      return reply.status(400).send({ success: false, error: "Invalid payload", details: error.message });
+    }
     logger.error({ err: error }, "Error tracking event");
     if (error instanceof ZodError) {
       return reply.status(400).send({

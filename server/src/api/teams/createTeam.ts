@@ -1,13 +1,17 @@
+import { isSiteGrantRole, SITE_GRANT_ROLES } from "@rybbit/shared";
 import { eq, and, inArray } from "drizzle-orm";
 import { FastifyReply, FastifyRequest } from "fastify";
 import { db } from "../../db/postgres/postgres.js";
 import { team, teamMember, teamSiteAccess, member, sites } from "../../db/postgres/schema.js";
+import { teamMembershipKey } from "../../lib/teamMembership.js";
 import { invalidateSitesAccessCache } from "../../lib/auth-utils.js";
 
 interface CreateTeamBody {
   name: string;
   memberUserIds?: string[];
   siteIds?: number[];
+  /** Role the team's members get on its sites (editor, member or viewer); omit or null for each member's organization role. */
+  siteRole?: string | null;
 }
 
 export async function createTeam(
@@ -18,10 +22,16 @@ export async function createTeam(
   reply: FastifyReply
 ) {
   const { organizationId } = request.params;
-  const { name, memberUserIds, siteIds } = request.body;
+  const { name, siteIds } = request.body;
+  const memberUserIds = request.body.memberUserIds === undefined ? undefined : [...new Set(request.body.memberUserIds)];
 
   if (!name || !name.trim()) {
     return reply.status(400).send({ error: "Team name is required" });
+  }
+
+  const siteRole = request.body.siteRole ?? null;
+  if (siteRole !== null && !isSiteGrantRole(siteRole)) {
+    return reply.status(400).send({ error: `siteRole must be one of: ${SITE_GRANT_ROLES.join(", ")}` });
   }
 
   try {
@@ -63,6 +73,7 @@ export async function createTeam(
       await tx.insert(team).values({
         id: teamId,
         name: name.trim(),
+        memberCount: memberUserIds?.length ?? 0,
         organizationId,
         createdAt: now,
         updatedAt: now,
@@ -75,6 +86,7 @@ export async function createTeam(
             id: crypto.randomUUID(),
             teamId,
             userId,
+            membershipKey: teamMembershipKey(teamId, userId),
             createdAt: now,
           }))
         );
@@ -86,6 +98,7 @@ export async function createTeam(
           siteIds.map(siteId => ({
             teamId,
             siteId,
+            role: siteRole,
           }))
         );
       }
@@ -106,6 +119,7 @@ export async function createTeam(
       updatedAt: now,
       members: memberUserIds || [],
       siteIds: siteIds || [],
+      siteRole,
     });
   } catch (error) {
     request.log.error({ err: error }, "Error creating team");

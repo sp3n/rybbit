@@ -7,7 +7,7 @@ import type { DashboardCard } from "@rybbit/shared";
 import { ArrowLeft, Check, ChevronLeft, ChevronRight, Loader2, Pencil, Plus } from "lucide-react";
 import { useParams, useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Responsive, WidthProvider, type Layout } from "react-grid-layout";
+import { Responsive, WidthProvider, type Layout, type Layouts } from "react-grid-layout";
 import { useGetDashboard, useUpdateDashboard } from "../../../../api/analytics/hooks/useDashboards";
 import { BucketSelection } from "../../../../components/BucketSelection";
 import { DateSelector } from "../../../../components/DateSelector/DateSelector";
@@ -25,6 +25,7 @@ import { Button } from "../../../../components/ui/button";
 import { Skeleton } from "../../../../components/ui/skeleton";
 import { toast } from "../../../../components/ui/sonner";
 import { cn } from "../../../../lib/utils";
+import { useCanOnSite } from "../../../../hooks/usePermissions";
 import { useSetPageTitle } from "../../../../hooks/useSetPageTitle";
 import { canGoBack, canGoForward, goBack, goForward, useStore } from "../../../../lib/store";
 import { DashboardCardEditor } from "../components/DashboardCardEditor";
@@ -34,8 +35,11 @@ import type { DashboardExample } from "../examples";
 import { cloneCard, createCard, createCardFromExample, MAX_CARDS_PER_DASHBOARD } from "../utils";
 
 const ResponsiveGridLayout = WidthProvider(Responsive);
-const GRID_COLS = { lg: 12, md: 12, sm: 6, xs: 4, xxs: 2 };
+const GRID_COLS: Record<string, number> = { lg: 12, md: 12, sm: 6, xs: 4, xxs: 2 };
 const BREAKPOINTS = { lg: 1200, md: 996, sm: 768, xs: 480, xxs: 0 };
+// Stored card positions are in this many columns; narrower breakpoints show a
+// copy squeezed into fewer columns.
+const CANONICAL_COLS = 12;
 
 export default function DashboardDetailPage() {
   useSetPageTitle("Dashboard");
@@ -47,6 +51,7 @@ export default function DashboardDetailPage() {
   const { time, setTime } = useStore();
   const { data: dashboard, isLoading } = useGetDashboard(siteId, dashboardId);
   const updateDashboard = useUpdateDashboard();
+  const canWrite = useCanOnSite("dashboards:write", siteId);
 
   const [editMode, setEditMode] = useState(false);
   const [name, setName] = useState<string | null>(null);
@@ -81,8 +86,13 @@ export default function DashboardDetailPage() {
 
   const editingCard = workingCards.find(card => card.id === editingCardId) ?? null;
 
-  const handleLayoutChange = (next: Layout[]) => {
+  const handleLayoutChange = (next: Layout[], allLayouts: Layouts) => {
     if (!editMode) return;
+    // The grid reports the active breakpoint's layout, keyed under that
+    // breakpoint in allLayouts. Below 12 columns it is the stored layout
+    // clamped to fit, so writing it back would squeeze the desktop layout.
+    const breakpoint = Object.keys(allLayouts).find(key => allLayouts[key] === next);
+    if (!breakpoint || GRID_COLS[breakpoint] !== CANONICAL_COLS) return;
     let changed = false;
     const updated = workingCards.map(card => {
       const item = next.find(entry => entry.i === card.id);
@@ -200,20 +210,28 @@ export default function DashboardDetailPage() {
     [guardedRun, router, siteId]
   );
 
-  const handleSave = useCallback(async () => {
-    try {
-      await updateDashboard.mutateAsync({
-        siteId,
-        dashboardId,
-        name: workingName,
-        config: { cards: workingCards },
-      });
-      toast.success("Dashboard saved");
-      resetWorkingCopy();
-      setEditMode(false);
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Couldn't save dashboard");
-    }
+  // The mutation writes the edit into the query cache up front, so leave edit
+  // mode right away rather than holding the user on a spinner. If the request
+  // fails the cache rolls back and we put the working copy (and edit mode) back
+  // exactly as it was, so nothing typed is lost.
+  const handleSave = useCallback(() => {
+    const savedName = workingName;
+    const savedCards = workingCards;
+    resetWorkingCopy();
+    setEditMode(false);
+    updateDashboard.mutate(
+      { siteId, dashboardId, name: savedName, config: { cards: savedCards } },
+      {
+        onSuccess: () => toast.success("Dashboard saved"),
+        onError: error => {
+          setName(savedName);
+          setCards(savedCards);
+          setDirty(true);
+          setEditMode(true);
+          toast.error(error instanceof Error ? error.message : "Couldn't save dashboard");
+        },
+      }
+    );
   }, [updateDashboard, siteId, dashboardId, workingName, workingCards, resetWorkingCopy]);
 
   // Warn before a full reload / tab close with unsaved edits.
@@ -280,14 +298,14 @@ export default function DashboardDetailPage() {
     const handler = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s") {
         event.preventDefault();
-        if (dirty && !updateDashboard.isPending) handleSave();
+        if (dirty) handleSave();
       } else if (event.key === "Escape" && !confirmExit && !editingCardId && !addingCard) {
         handleCancel();
       }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [editMode, dirty, confirmExit, editingCardId, addingCard, updateDashboard.isPending, handleSave, handleCancel]);
+  }, [editMode, dirty, confirmExit, editingCardId, addingCard, handleSave, handleCancel]);
 
   if (isLoading) {
     return (
@@ -380,21 +398,17 @@ export default function DashboardDetailPage() {
               <Button variant="ghost" size="sm" onClick={handleCancel}>
                 Cancel
               </Button>
-              <Button size="sm" onClick={handleSave} disabled={!dirty || updateDashboard.isPending}>
-                {updateDashboard.isPending ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  <Check className="h-4 w-4" />
-                )}
+              <Button size="sm" onClick={handleSave} disabled={!dirty}>
+                <Check className="h-4 w-4" />
                 Save
               </Button>
             </>
-          ) : (
+          ) : canWrite ? (
             <Button variant="outline" size="sm" onClick={() => setEditMode(true)}>
               <Pencil className="h-4 w-4" />
               Edit
             </Button>
-          )}
+          ) : null}
         </div>
       </div>
 
@@ -407,10 +421,12 @@ export default function DashboardDetailPage() {
               range above and can be dragged and resized.
             </p>
           </div>
-          <Button variant="outline" onClick={handleAddCard}>
-            <Plus className="h-4 w-4" />
-            Add a card
-          </Button>
+          {canWrite && (
+            <Button variant="outline" onClick={handleAddCard}>
+              <Plus className="h-4 w-4" />
+              Add a card
+            </Button>
+          )}
         </div>
       ) : (
         <div

@@ -4,14 +4,15 @@ import { RybbitApiClient } from "../apiClient.js";
 import { FILTER_PARAMETERS, TIME_BUCKETS, filtersInput, siteIdInput, timeInputs } from "../inputs.js";
 import { looseRow, ok, readOnly, siteQuery, type ScopeCheck, type ToolGuard } from "./shared.js";
 
+// Averages and rates come back null (ClickHouse NaN) for a window with no sessions.
 const overviewMetrics = z
   .object({
     sessions: z.number(),
     pageviews: z.number(),
     users: z.number(),
-    pages_per_session: z.number(),
-    bounce_rate: z.number(),
-    session_duration: z.number(),
+    pages_per_session: z.number().nullable(),
+    bounce_rate: z.number().nullable(),
+    session_duration: z.number().nullable(),
   })
   .partial()
   .passthrough();
@@ -150,7 +151,7 @@ export function registerAnalyticsTools(server: McpServer, api: RybbitApiClient, 
       inputSchema: {
         site_id: siteIdInput,
         dimension: z.enum(FILTER_PARAMETERS).describe("The dimension to break down by, e.g. pathname, referrer, country, channel"),
-        limit: z.number().int().min(1).max(500).default(25).describe("Rows to return"),
+        limit: z.number().int().min(1).max(100).default(25).describe("Rows to return (max 100; use page for more)"),
         page: z.number().int().min(1).optional().describe("1-based page for paging past the first `limit` rows"),
         ...timeInputs,
         filters: filtersInput,
@@ -261,7 +262,7 @@ export function registerAnalyticsTools(server: McpServer, api: RybbitApiClient, 
       inputSchema: {
         site_id: siteIdInput,
         steps: z.number().int().min(2).max(10).default(3).describe("Journey length in pages"),
-        limit: z.number().int().min(1).max(500).default(25).describe("Number of journeys to return"),
+        limit: z.number().int().min(1).max(100).default(25).describe("Number of journeys to return (max 100)"),
         ...timeInputs,
         filters: filtersInput,
       },

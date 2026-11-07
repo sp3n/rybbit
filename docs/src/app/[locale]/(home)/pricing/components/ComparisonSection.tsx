@@ -266,13 +266,13 @@ export function ComparisonSection({ isAnnual }: { isAnnual: boolean }) {
                   name: t("Standard"),
                   price: "From $" + (isAnnual ? "13" : "19") + " /month",
                   href: "https://app.rybbit.io/signup",
-                  cta: t("Start for $0"),
+                  cta: t("Start free trial for $0"),
                 },
                 {
                   name: t("Pro"),
                   price: "From $" + (isAnnual ? "26" : "39") + " /month",
                   href: "https://app.rybbit.io/signup",
-                  cta: t("Start for $0"),
+                  cta: t("Start free trial for $0"),
                   featured: true,
                 },
                 {
@@ -281,12 +281,14 @@ export function ComparisonSection({ isAnnual }: { isAnnual: boolean }) {
                   href: "https://www.rybbit.com/contact",
                   cta: t("Contact us"),
                 },
-              ].map((plan) => (
+              ].map(plan => (
                 <div
                   key={plan.name}
                   className="flex flex-col items-center border-r border-neutral-200 px-4 py-7 text-center last:border-r-0 dark:border-neutral-800"
                 >
-                  <h3 className={cn("text-lg font-semibold", plan.featured && "text-emerald-600 dark:text-emerald-400")}>
+                  <h3
+                    className={cn("text-lg font-semibold", plan.featured && "text-emerald-600 dark:text-emerald-400")}
+                  >
                     {plan.name}
                   </h3>
                   <p className="mt-1 text-sm text-neutral-500 dark:text-neutral-400">{plan.price}</p>
@@ -305,12 +307,12 @@ export function ComparisonSection({ isAnnual }: { isAnnual: boolean }) {
               ))}
             </div>
 
-            {COMPARISON_FEATURES.map((category) => (
+            {COMPARISON_FEATURES.map(category => (
               <div key={category.category}>
                 <div className="border-b border-neutral-200 bg-neutral-50 px-6 py-3 text-xs font-semibold uppercase tracking-[0.12em] text-neutral-500 dark:border-neutral-800 dark:bg-neutral-900/60 lg:px-10">
                   {category.category}
                 </div>
-                {category.features.map((feature) => (
+                {category.features.map(feature => (
                   <div
                     key={feature.name}
                     className="grid grid-cols-4 border-b border-neutral-200 text-sm last:border-b-0 dark:border-neutral-800"

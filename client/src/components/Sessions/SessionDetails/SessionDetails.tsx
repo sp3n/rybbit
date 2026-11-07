@@ -1,9 +1,9 @@
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { useSitePath } from "@/app/[site]/sessions/components/useSitePath";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/basic-tabs";
 import { ArrowRight } from "lucide-react";
 import { useExtracted } from "next-intl";
 import Link from "next/link";
-import { useParams } from "next/navigation";
 import { useMemo, useState } from "react";
 
 import { useGetSite } from "../../../api/admin/hooks/useSites";
@@ -30,8 +30,8 @@ export function SessionDetails({ session, userId, highlightedEventTimestamp }: S
     hasNextPage,
     isFetchingNextPage,
   } = useGetSessionDetailsInfinite(session.session_id);
-  const { site } = useParams();
-  const { data: siteMetadata } = useGetSite(site as string);
+  const sitePath = useSitePath();
+  const { data: siteMetadata } = useGetSite();
   const t = useExtracted();
   const isGame = siteMetadata?.type === "game";
 
@@ -46,7 +46,18 @@ export function SessionDetails({ session, userId, highlightedEventTimestamp }: S
 
   // Event type filter state
   const [visibleEventTypes, setVisibleEventTypes] = useState<Set<string>>(
-    new Set(["pageview", "custom_event", "outbound", "button_click", "copy", "form_submit", "input_change"])
+    new Set([
+      "pageview",
+      "custom_event",
+      "outbound",
+      "button_click",
+      "copy",
+      "form_submit",
+      "input_change",
+      // Errors used to start hidden, so a session's failures only appeared
+      // after finding and switching on their chip.
+      "error",
+    ])
   );
   const [visibleGameCategories, setVisibleGameCategories] = useState<Set<GameEventCategory>>(
     new Set(GAME_EVENT_CATEGORIES)
@@ -106,9 +117,9 @@ export function SessionDetails({ session, userId, highlightedEventTimestamp }: S
             </TabsList>
             {!userId && (
               <Link
-                href={`/${site}/user/${encodeURIComponent(
+                href={sitePath(`user/${encodeURIComponent(
                   isIdentified ? session.identified_user_id : session.user_id
-                )}`}
+                )}`)}
               >
                 <Button size={"sm"} variant={"success"}>
                   {isGame ? t("View Player") : t("View User")} <ArrowRight className="w-4 h-4" />

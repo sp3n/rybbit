@@ -6,6 +6,7 @@ const state = vi.hoisted(() => ({
   deleteError: null as Error | null,
   updates: [] as Record<string, unknown>[],
   deletes: 0,
+  isCloud: false,
 }));
 
 const mocks = vi.hoisted(() => ({
@@ -35,6 +36,17 @@ vi.mock("../../db/postgres/postgres.js", () => ({
         state.deletes += 1;
       },
     })),
+    // Rolls back the counted deletes when the callback throws.
+    transaction: vi.fn(async (fn: (tx: unknown) => Promise<unknown>) => {
+      const { db } = await import("../../db/postgres/postgres.js");
+      const deletesBefore = state.deletes;
+      try {
+        return await fn(db);
+      } catch (error) {
+        state.deletes = deletesBefore;
+        throw error;
+      }
+    }),
   },
 }));
 
@@ -50,6 +62,14 @@ vi.mock("../../api/stripe/getSubscription.js", () => ({
   getSubscriptionInner: vi.fn(),
 }));
 
+vi.mock("../../lib/const.js", async importOriginal => ({
+  ...(await importOriginal<typeof import("../../lib/const.js")>()),
+  get IS_CLOUD() {
+    return state.isCloud;
+  },
+}));
+
+import { getSubscriptionInner } from "../../api/stripe/getSubscription.js";
 import { siteConfigurationLifecycle } from "./siteConfigurationLifecycle.js";
 
 function makeSite() {
@@ -69,6 +89,7 @@ beforeEach(() => {
   state.deleteError = null;
   state.updates.length = 0;
   state.deletes = 0;
+  state.isCloud = false;
   mocks.clickhouseCommand.mockResolvedValue(undefined);
   mocks.getConfig.mockResolvedValue({ siteId: 1, id: "abcdef123456", name: "Renamed" });
 });
@@ -106,6 +127,13 @@ describe("siteConfigurationLifecycle", () => {
     });
   });
 
+  it.each([true, false])("persists URL fragment tracking set to %s and invalidates the cache", async enabled => {
+    await siteConfigurationLifecycle.update(1, { trackUrlFragments: enabled });
+
+    expect(state.updates).toEqual([expect.objectContaining({ trackUrlFragments: enabled })]);
+    expect(mocks.invalidate).toHaveBeenCalledWith(state.site);
+  });
+
   it("updates persistence once, invalidates the Site, and reloads its configuration", async () => {
     const result = await siteConfigurationLifecycle.update(1, { name: "Renamed" });
 
@@ -126,6 +154,48 @@ describe("siteConfigurationLifecycle", () => {
     expect(mocks.getConfig).not.toHaveBeenCalled();
   });
 
+  describe("Standard feature entitlement on cloud", () => {
+    beforeEach(() => {
+      state.isCloud = true;
+    });
+
+    it("refuses to turn on a Standard feature without an active subscription", async () => {
+      vi.mocked(getSubscriptionInner).mockResolvedValue({ status: "free", includesReplay: false } as any);
+
+      await expect(siteConfigurationLifecycle.update(1, { webVitals: true })).rejects.toMatchObject({
+        code: "standard_features_not_entitled",
+        statusCode: 403,
+      });
+      expect(state.updates).toEqual([]);
+    });
+
+    it.each(["active", "trialing"])("turns a Standard feature on for a %s subscription", async status => {
+      vi.mocked(getSubscriptionInner).mockResolvedValue({ status, includesReplay: false } as any);
+
+      await siteConfigurationLifecycle.update(1, { trackErrors: true });
+
+      expect(state.updates).toEqual([expect.objectContaining({ trackErrors: true })]);
+    });
+
+    it("always lets a Standard feature be turned off", async () => {
+      state.site = { ...makeSite(), trackFormInteractions: true };
+
+      await siteConfigurationLifecycle.update(1, { trackFormInteractions: false });
+
+      expect(getSubscriptionInner).not.toHaveBeenCalled();
+      expect(state.updates).toEqual([expect.objectContaining({ trackFormInteractions: false })]);
+    });
+
+    it("keeps accepting a Standard feature the site already has, e.g. a full-form save", async () => {
+      state.site = { ...makeSite(), webVitals: true };
+
+      await siteConfigurationLifecycle.update(1, { webVitals: true, name: "Renamed" });
+
+      expect(getSubscriptionInner).not.toHaveBeenCalled();
+      expect(state.updates).toEqual([expect.objectContaining({ webVitals: true, name: "Renamed" })]);
+    });
+  });
+
   it("owns private-link persistence and invalidation", async () => {
     const privateLinkKey = await siteConfigurationLifecycle.updatePrivateLink(1, "generate_private_link_key");
 
@@ -134,15 +204,32 @@ describe("siteConfigurationLifecycle", () => {
     expect(mocks.invalidate).toHaveBeenCalledWith(state.site);
   });
 
-  it("deletes replay data before the Site row and then invalidates the Site", async () => {
+  it("deletes the import rows and the Site row, wipes replay data, then invalidates the Site", async () => {
     await siteConfigurationLifecycle.delete(1);
 
+    expect(state.deletes).toBe(2);
     expect(mocks.clickhouseCommand).toHaveBeenCalledTimes(2);
-    expect(state.deletes).toBe(1);
     expect(mocks.invalidate).toHaveBeenCalledWith(state.site);
   });
 
-  it("does not report deletion when replay cleanup fails", async () => {
+  it("queues the replay deletes instead of waiting behind other mutations", async () => {
+    await siteConfigurationLifecycle.delete(1);
+
+    for (const [call] of mocks.clickhouseCommand.mock.calls) {
+      expect(call.clickhouse_settings).toEqual({ lightweight_deletes_sync: "0" });
+    }
+  });
+
+  it("keeps replay data when the Postgres delete fails", async () => {
+    state.deleteError = new Error("foreign key violation");
+
+    await expect(siteConfigurationLifecycle.delete(1)).rejects.toThrow("foreign key violation");
+
+    expect(mocks.clickhouseCommand).not.toHaveBeenCalled();
+    expect(mocks.invalidate).not.toHaveBeenCalled();
+  });
+
+  it("rolls the Site back when replay cleanup fails", async () => {
     mocks.clickhouseCommand.mockRejectedValueOnce(new Error("clickhouse unavailable"));
 
     await expect(siteConfigurationLifecycle.delete(1)).rejects.toThrow("clickhouse unavailable");

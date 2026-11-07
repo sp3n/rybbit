@@ -1,13 +1,21 @@
 import { FastifyReply, FastifyRequest } from "fastify";
-import { sql, SQL } from "drizzle-orm";
-import { db } from "../../../db/postgres/postgres.js";
+import { z } from "zod";
 import { enrichWithTraits } from "../utils/utils.js";
 import { getTimeStatement } from "../utils/timeWindow.js";
 import { FilterParams } from "@rybbit/shared";
-import { getFilterStatement } from "../utils/getFilterStatement.js";
 import { SESSION_CHANNEL_AGG, SESSION_REFERRER_AGG } from "../utils/sessionAttribution.js";
+import { buildFilteredSessionsCTE } from "../utils/sessionFilters.js";
 import { analyticsRoute, runAnalyticsQuery } from "../utils/analyticsQuery.js";
 import { effectiveUserId } from "../utils/effectiveUserId.js";
+import {
+  buildUserNarrowing,
+  pagingParam,
+  resolveSearchScope,
+  resolveTraitCohort,
+  UserNarrowingParams,
+  userNarrowingSchema,
+  UserScope,
+} from "./userScope.js";
 
 export type GetUsersResponse = {
   user_id: string; // Device fingerprint
@@ -32,80 +40,130 @@ export interface GetUsersRequest {
   Params: {
     siteId: string;
   };
-  Querystring: FilterParams<{
-    page?: string;
-    page_size?: string;
-    sort_by?: string;
-    sort_order?: string;
-    identified_only?: string;
-    search?: string;
-    search_field?: string;
-  }>;
+  Querystring: FilterParams<
+    UserNarrowingParams & {
+      page?: string;
+      page_size?: string;
+      sort_by?: string;
+      sort_order?: string;
+    }
+  >;
 }
+
+const DEFAULT_PAGE_SIZE = 100;
+// The dashboard asks for at most 100 rows; larger pages are capped, as the
+// sessions list caps its own.
+const MAX_PAGE_SIZE = 1000;
+// The offset is bound as Int32.
+const MAX_OFFSET = 2_147_483_647;
+
+const usersPaginationSchema = z.object({
+  page: pagingParam("page", 1),
+  page_size: pagingParam("page_size", 1),
+});
+
+/** The list's page and offset: a malformed value is an error, an oversized page is capped. */
+export const parseUsersPagination = (
+  query: unknown
+): { ok: true; page: number; pageSize: number; offset: number } | { ok: false; error: string } => {
+  const parsed = usersPaginationSchema.safeParse(query);
+  if (!parsed.success) {
+    return { ok: false, error: parsed.error.issues[0]?.message ?? "Invalid pagination parameters" };
+  }
+  const page = parsed.data.page ?? 1;
+  const pageSize = Math.min(parsed.data.page_size ?? DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE);
+  const offset = (page - 1) * pageSize;
+  if (offset > MAX_OFFSET) {
+    return { ok: false, error: "page is out of range" };
+  }
+  return { ok: true, page, pageSize, offset };
+};
 
 export const buildUsersQuery = (
   query: GetUsersRequest["Querystring"],
   siteId: number,
-  matchingUserIds: string[] | null,
+  scope: UserScope | null,
   isCountQuery: boolean = false
 ) => {
-  const {
-    filters,
-    sort_by: sortBy = "last_seen",
-    sort_order: sortOrder = "desc",
-    identified_only: identifiedOnly = "false",
-  } = query;
-  // Search results force the identified-only view: matching user IDs come from
-  // Postgres profiles, which only exist for identified users.
-  const filterIdentified = identifiedOnly === "true" || matchingUserIds !== null;
+  const { filters, sort_by: sortBy = "last_seen", sort_order: sortOrder = "desc" } = query;
+  const narrowing = buildUserNarrowing(query, scope ?? {});
+  // Ids resolved in Postgres (a profile search, a trait group) force the
+  // identified-only view: profiles only exist for identified users.
+  const filterIdentified = query.identified_only === "true" || !!scope?.matchingUserIds;
 
   // Validate sort parameters
   const validSortFields = ["first_seen", "last_seen", "pageviews", "sessions", "events"];
   const actualSortBy = validSortFields.includes(sortBy) ? sortBy : "last_seen";
   const actualSortOrder = sortOrder === "asc" ? "ASC" : "DESC";
 
-  // Generate filter statement and time statement
+  // Dimension filters qualify sessions. User aggregates then consume every
+  // event in those sessions, so an acquisition value on the landing event does
+  // not discard later pageviews or custom events from the same session.
   const timeStatement = getTimeStatement(query);
-  // Applied against raw events (same placement as the count queries): the
-  // aggregate doesn't project every filterable column (pathname, querystring,
-  // utm_*, …), and event-level placement keeps the returned rows consistent
-  // with totalCount.
-  const filterStatement = getFilterStatement(filters, siteId, timeStatement);
+  const filteredSessionsCTE = buildFilteredSessionsCTE(filters, siteId, timeStatement);
+  const filteredSessionsJoin = filteredSessionsCTE ? "INNER JOIN FilteredSessions USING (session_id)" : "";
+  const withFilteredSessions = filteredSessionsCTE ? `WITH ${filteredSessionsCTE}` : "";
 
   // Query to get total count
   if (isCountQuery) {
+    // A minimum session count or "new" is a property of the user, not of any
+    // one event, so the count has to build the per-user rows it filters.
+    if (narrowing.needsUserAggregate) {
+      return `
+${withFilteredSessions}
+SELECT count() AS total_count
+FROM (
+    SELECT
+        ${effectiveUserId("events")} AS effective_user_id,
+        argMax(identified_user_id, timestamp) AS identified_user_id,
+        count(DISTINCT session_id) AS sessions
+    FROM (
+        SELECT *
+        FROM events
+        ${filteredSessionsJoin}
+        WHERE
+            site_id = {siteId:Int32}
+            ${timeStatement}
+            ${narrowing.eventConditions}
+    ) AS events
+    GROUP BY effective_user_id
+)
+WHERE 1 = 1
+${narrowing.userConditions}
+`;
+    }
+
     return filterIdentified
       ? `
+${withFilteredSessions}
 SELECT count(*) AS total_count
 FROM (
     SELECT DISTINCT identified_user_id
     FROM events
+    ${filteredSessionsJoin}
     WHERE
         site_id = {siteId:Int32}
         AND identified_user_id != ''
         ${timeStatement}
-        ${filterStatement}
-        ${matchingUserIds ? "AND events.identified_user_id IN ({matchingUserIds:Array(String)})" : ""}
+        ${narrowing.eventConditions}
 )
 `
       : `
+${withFilteredSessions}
 SELECT
     count(DISTINCT ${effectiveUserId("events")}) AS total_count
 FROM events
+${filteredSessionsJoin}
 WHERE
     site_id = {siteId:Int32}
-    ${filterStatement}
     ${timeStatement}
-    ${matchingUserIds ? "AND events.identified_user_id IN ({matchingUserIds:Array(String)})" : ""}
+    ${narrowing.eventConditions}
   `;
   }
 
-  // Filters must run in a subquery below the aggregation: the aggregate SELECT
-  // aliases argMax(...) to the same names as the raw columns (country, browser,
-  // …), and ClickHouse resolves unqualified WHERE references at that level to
-  // the aliases, throwing ILLEGAL_AGGREGATION.
   return `
-WITH AggregatedUsers AS (
+WITH ${filteredSessionsCTE ? `${filteredSessionsCTE},` : ""}
+AggregatedUsers AS (
     SELECT
         -- Group by effective user: identified_user_id for identified users, user_id (device) for anonymous
         ${effectiveUserId("events")} AS effective_user_id,
@@ -134,11 +192,11 @@ WITH AggregatedUsers AS (
     FROM (
         SELECT *
         FROM events
+        ${filteredSessionsJoin}
         WHERE
             site_id = {siteId:Int32}
             ${timeStatement}
-            ${filterStatement}
-            ${matchingUserIds ? "AND events.identified_user_id IN ({matchingUserIds:Array(String)})" : ""}
+            ${narrowing.eventConditions}
     ) AS events
     GROUP BY
         effective_user_id
@@ -147,8 +205,8 @@ SELECT
     *
 FROM AggregatedUsers
 WHERE 1 = 1
-${filterIdentified ? "AND identified_user_id != ''" : ""}
-ORDER BY ${actualSortBy} ${actualSortOrder}
+${narrowing.userConditions}
+ORDER BY ${actualSortBy} ${actualSortOrder}, effective_user_id ASC
 LIMIT {limit:Int32} OFFSET {offset:Int32}
   `;
 };
@@ -156,61 +214,78 @@ LIMIT {limit:Int32} OFFSET {offset:Int32}
 export const getUsers = analyticsRoute<GetUsersRequest>(
   "users",
   async (req: FastifyRequest<GetUsersRequest>, res: FastifyReply) => {
-    const { page = "1", page_size: pageSize = "100", search, search_field: searchField = "username" } = req.query;
-    const site = req.params.siteId;
+    const parsed = userNarrowingSchema.safeParse(req.query);
+    if (!parsed.success) {
+      return res.status(400).send({ error: parsed.error.issues[0]?.message ?? "Invalid query parameters" });
+    }
 
-    // Search for matching user IDs in Postgres when search is provided
-    const MAX_MATCHING_USER_IDS = 10000;
-    let matchingUserIds: string[] | null = null;
-    if (search && search.trim()) {
-      const searchTerm = `%${search.trim()}%`;
-      const siteId = Number(site);
+    const pagination = parseUsersPagination(req.query);
+    if (!pagination.ok) {
+      return res.status(400).send({ error: pagination.error });
+    }
 
-      const fieldConditions: Record<string, SQL> = {
-        username: sql`traits->>'username' ILIKE ${searchTerm}`,
-        name: sql`traits->>'name' ILIKE ${searchTerm}`,
-        email: sql`traits->>'email' ILIKE ${searchTerm}`,
-        user_id: sql`user_id ILIKE ${searchTerm}`,
-      };
-      const condition = fieldConditions[searchField] ?? fieldConditions.username;
+    const { trait_key: traitKey, trait_value: traitValue, trait_missing: traitMissing } = parsed.data;
+    const siteId = Number(req.params.siteId);
+    const { page: pageNum, pageSize: pageSizeNum, offset } = pagination;
 
-      const searchResult = await db.execute<{ user_id: string }>(sql`
-        SELECT user_id FROM user_profiles
-        WHERE site_id = ${siteId} AND ${condition}
-        LIMIT ${MAX_MATCHING_USER_IDS}
-      `);
+    if (traitKey && traitValue === undefined && traitMissing !== "true") {
+      return res.status(400).send({ error: "trait_key needs trait_value or trait_missing=true" });
+    }
 
-      matchingUserIds = searchResult.map((r) => r.user_id);
-      if (matchingUserIds.length === 0) {
-        return res.send({
-          data: [],
-          totalCount: 0,
-          page: parseInt(page, 10),
-          pageSize: parseInt(pageSize, 10),
-        });
+    const empty = (flags: { searchLimited?: boolean; breakdownLimited?: boolean } = {}) =>
+      res.send({ data: [], totalCount: 0, page: pageNum, pageSize: pageSizeNum, ...flags });
+
+    // A name, username or email search resolves to identified ids in Postgres.
+    const search = await resolveSearchScope(req.query, siteId);
+    if (search.matchingUserIds?.length === 0) {
+      return empty();
+    }
+    let scope: UserScope = { matchingUserIds: search.matchingUserIds };
+
+    // One group of a trait breakdown: the people in the period whose trait has
+    // this value, or who have no value for it.
+    if (traitKey) {
+      const cohort = await resolveTraitCohort(req.query, siteId, traitKey, scope);
+      if (cohort.limited) {
+        return empty({ searchLimited: search.limited, breakdownLimited: true });
+      }
+      if (traitMissing === "true" && scope.matchingUserIds) {
+        // Already limited to the searched ids: drop the ones with a value
+        // rather than sending a second list.
+        const ids = scope.matchingUserIds.filter(userId => !cohort.values.has(userId));
+        if (ids.length === 0) {
+          return empty({ searchLimited: search.limited });
+        }
+        scope = { matchingUserIds: ids };
+      } else if (traitMissing === "true") {
+        scope = { excludedUserIds: [...cohort.values.keys()] };
+      } else {
+        const ids = [...cohort.values].filter(([, value]) => value === traitValue).map(([userId]) => userId);
+        if (ids.length === 0) {
+          return empty({ searchLimited: search.limited });
+        }
+        scope = { matchingUserIds: ids };
       }
     }
 
-    const pageNum = parseInt(page, 10);
-    const pageSizeNum = parseInt(pageSize, 10);
-    const offset = (pageNum - 1) * pageSizeNum;
+    const { params: narrowingParams } = buildUserNarrowing(req.query, scope);
 
     // Execute both queries in parallel
     const [data, countData] = await Promise.all([
       runAnalyticsQuery<Omit<GetUsersResponse[number], "traits">>({
-        query: buildUsersQuery(req.query, Number(site), matchingUserIds, false),
+        query: buildUsersQuery(req.query, siteId, scope, false),
         params: {
-          siteId: Number(site),
+          siteId,
           limit: pageSizeNum,
           offset,
-          ...(matchingUserIds ? { matchingUserIds } : {}),
+          ...narrowingParams,
         },
       }),
       runAnalyticsQuery<{ total_count: number }>({
-        query: buildUsersQuery(req.query, Number(site), matchingUserIds, true),
+        query: buildUsersQuery(req.query, siteId, scope, true),
         params: {
-          siteId: Number(site),
-          ...(matchingUserIds ? { matchingUserIds } : {}),
+          siteId,
+          ...narrowingParams,
         },
       }),
     ]);
@@ -218,13 +293,15 @@ export const getUsers = analyticsRoute<GetUsersRequest>(
     const totalCount = countData[0]?.total_count || 0;
 
     // Enrich with traits from Postgres
-    const dataWithTraits = await enrichWithTraits(data, Number(site));
+    const dataWithTraits = await enrichWithTraits(data, siteId);
 
     return res.send({
       data: dataWithTraits,
       totalCount,
       page: pageNum,
       pageSize: pageSizeNum,
+      // True when more profiles matched the search than can be looked up at once.
+      searchLimited: search.limited,
     });
   }
 );

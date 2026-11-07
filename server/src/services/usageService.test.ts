@@ -9,7 +9,8 @@ import type { SubscriptionInfo } from "../lib/subscriptionUtils.js";
  * subject under test.
  */
 const state = vi.hoisted(() => ({
-  sites: [] as Array<{ siteId: number; organizationId: string | null }>,
+  isCloud: false,
+  sites: [] as Array<{ siteId: number; organizationId: string | null; createdAt?: string | null }>,
   organizations: [] as Array<{
     id: string;
     name: string;
@@ -32,6 +33,7 @@ const mocks = vi.hoisted(() => ({
   getAllStripeSubscriptionsByCustomer: vi.fn(),
   sendLimitExceededEmail: vi.fn(),
   sendApproachingLimitEmail: vi.fn(),
+  sendTrialGraceDue: vi.fn(),
 }));
 
 vi.mock("../db/postgres/postgres.js", () => {
@@ -40,6 +42,7 @@ vi.mock("../db/postgres/postgres.js", () => {
       from: () => builder,
       innerJoin: () => builder,
       where: () => builder,
+      limit: () => builder,
       then: (resolve: any, reject: any) => Promise.resolve(rows()).then(resolve, reject),
     };
     return builder;
@@ -86,6 +89,10 @@ vi.mock("../lib/email/email.js", () => ({
   sendApproachingLimitEmail: mocks.sendApproachingLimitEmail,
 }));
 
+vi.mock("./trialGrace/trialGraceEmails.js", () => ({
+  trialGraceEmails: { sendDue: mocks.sendTrialGraceDue },
+}));
+
 vi.mock("../lib/logger/logger.js", () => ({
   createServiceLogger: () => ({
     info: vi.fn(),
@@ -102,6 +109,13 @@ vi.mock("../lib/subscriptionUtils.js", async importOriginal => {
     ...actual,
     getAllStripeSubscriptionsByCustomer: mocks.getAllStripeSubscriptionsByCustomer,
     stripeSubscriptionInfoFromSnapshot: () => null,
+    getBestSubscription: async (organizationId: string) => {
+      const subscription = state.subscriptions.get(organizationId);
+      if (subscription instanceof Error) {
+        throw subscription;
+      }
+      return subscription ?? freeSub();
+    },
     getBestSubscriptionFromStripeSub: async (organizationId: string) => {
       const subscription = state.subscriptions.get(organizationId);
       if (subscription instanceof Error) {
@@ -113,6 +127,16 @@ vi.mock("../lib/subscriptionUtils.js", async importOriginal => {
 });
 
 vi.mock("../lib/stripe.js", () => ({ stripe: null }));
+
+vi.mock("../lib/const.js", async importOriginal => {
+  const actual = await importOriginal<typeof import("../lib/const.js")>();
+  return {
+    ...actual,
+    get IS_CLOUD() {
+      return state.isCloud;
+    },
+  };
+});
 
 import { usageService } from "./usageService.js";
 
@@ -182,6 +206,7 @@ beforeEach(() => {
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(new Date(2026, 7, 3, 12, 0, 0));
 
+  state.isCloud = false;
   state.sites = [];
   state.organizations = [];
   state.owners = [{ email: "owner@example.com" }];
@@ -197,9 +222,12 @@ beforeEach(() => {
   mocks.sendLimitExceededEmail.mockResolvedValue(undefined);
   mocks.sendApproachingLimitEmail.mockReset();
   mocks.sendApproachingLimitEmail.mockResolvedValue(undefined);
+  mocks.sendTrialGraceDue.mockReset();
+  mocks.sendTrialGraceDue.mockResolvedValue(undefined);
 
   // The service is a singleton; clear the blocked sets between tests.
   usageService.setSitesOverLimit(new Set());
+  usageService.setSitesWithoutPlan(new Set());
   usageService.setSitesWithoutReplay(new Set());
 });
 
@@ -296,14 +324,30 @@ describe("updateOrganizationsMonthlyUsage — event limit boundary", () => {
     expect(usageService.getSitesOverLimit().size).toBe(0);
   });
 
-  it("fails open when ClickHouse cannot be queried", async () => {
-    singleOrg({ subscription: stripeSub({ eventLimit: 1_000 }), eventCount: 10_000_000 });
+  it("skips the run and keeps the last counts and blocks when ClickHouse cannot be queried", async () => {
+    usageService.setSitesOverLimit(new Set([1]));
+    singleOrg({
+      subscription: stripeSub({ eventLimit: 1_000 }),
+      eventCount: 10_000_000,
+      orgOverrides: { overMonthlyLimit: true },
+    });
     state.clickhouseError = new Error("clickhouse is down");
+    const onUpdated = vi.fn();
+    usageService.onUsageUpdated(onUpdated);
 
     await usageService.updateOrganizationsMonthlyUsage();
 
-    expect(state.updates[0]).toMatchObject({ monthlyEventCount: 0, overMonthlyLimit: false });
-    expect(usageService.getSitesOverLimit().size).toBe(0);
+    expect(state.updates).toEqual([]);
+    expect(usageService.isSiteOverLimit(1)).toBe(true);
+    expect(mocks.sendLimitExceededEmail).not.toHaveBeenCalled();
+    expect(onUpdated).not.toHaveBeenCalled();
+
+    // Once ClickHouse is back, the org is still over and was already notified: no repeat email.
+    state.clickhouseError = null;
+    await usageService.updateOrganizationsMonthlyUsage();
+
+    expect(state.updates[0]).toMatchObject({ monthlyEventCount: 10_000_000, overMonthlyLimit: true });
+    expect(mocks.sendLimitExceededEmail).not.toHaveBeenCalled();
   });
 });
 
@@ -315,7 +359,10 @@ describe("updateOrganizationsMonthlyUsage — limit exceeded email", () => {
     await usageService.updateOrganizationsMonthlyUsage();
 
     expect(mocks.sendLimitExceededEmail).toHaveBeenCalledTimes(2);
-    expect(mocks.sendLimitExceededEmail).toHaveBeenCalledWith("a@example.com", "Org org_1", 101, 100);
+    expect(mocks.sendLimitExceededEmail).toHaveBeenCalledWith(
+      "a@example.com",
+      expect.objectContaining({ organizationName: "Org org_1", eventCount: 101, eventLimit: 100 })
+    );
   });
 
   it("does not re-email an org that was already over its limit", async () => {
@@ -357,7 +404,10 @@ describe("updateOrganizationsMonthlyUsage — approaching limit email", () => {
 
     await usageService.updateOrganizationsMonthlyUsage();
 
-    expect(mocks.sendApproachingLimitEmail).toHaveBeenCalledWith("owner@example.com", "Org org_1", 90_000, 100_000);
+    expect(mocks.sendApproachingLimitEmail).toHaveBeenCalledWith(
+      "owner@example.com",
+      expect.objectContaining({ organizationName: "Org org_1", eventCount: 90_000, eventLimit: 100_000 })
+    );
     expect(state.updates[0]).toMatchObject({ approachingLimitNotifiedPeriodStart: "2026-08-01" });
   });
 
@@ -562,5 +612,177 @@ describe("updateOrganizationsMonthlyUsage — resilience and notification", () =
     await usageService.updateOrganizationsMonthlyUsage();
 
     expect(callback).not.toHaveBeenCalled();
+  });
+});
+
+describe("sites that need a plan (cloud, free plan ended 2026-02-13)", () => {
+  beforeEach(() => {
+    state.isCloud = true;
+    state.organizations = [org("org_1", { stripeCustomerId: null })];
+    state.sites = [
+      { siteId: 1, organizationId: "org_1", createdAt: "2025-11-02 10:00:00" },
+      { siteId: 2, organizationId: "org_1", createdAt: "2026-09-01 10:00:00" },
+    ];
+  });
+
+  it("blocks sites created after the cutoff in an org with no plan, and keeps legacy sites on the free tier", async () => {
+    await usageService.updateOrganizationsMonthlyUsage();
+
+    expect(usageService.isSiteWithoutPlan(1)).toBe(false);
+    expect(usageService.isSiteWithoutPlan(2)).toBe(true);
+    // Needing a plan is not exceeding a limit: no over-limit block, flag or email.
+    expect(usageService.isSiteOverLimit(2)).toBe(false);
+    expect(state.updates[0]).toMatchObject({ overMonthlyLimit: false });
+    expect(mocks.sendLimitExceededEmail).not.toHaveBeenCalled();
+  });
+
+  it("does not block any site once the org has a trial", async () => {
+    state.subscriptions.set("org_1", stripeSub({ status: "trialing" }));
+
+    await usageService.updateOrganizationsMonthlyUsage();
+
+    expect(usageService.getSitesWithoutPlan().size).toBe(0);
+  });
+
+  it("keeps the org's blocks when its plan lookup fails, instead of treating it as free", async () => {
+    state.subscriptions.set("org_1", stripeSub({ status: "trialing" }));
+    await usageService.updateOrganizationsMonthlyUsage();
+
+    state.subscriptions.set("org_1", new Error("appsumo lookup timed out"));
+    await usageService.updateOrganizationsMonthlyUsage();
+
+    expect(usageService.isSiteWithoutPlan(2)).toBe(false);
+  });
+
+  it("refreshOrganization unblocks the org's sites as soon as a trial starts", async () => {
+    await usageService.updateOrganizationsMonthlyUsage();
+    expect(usageService.isSiteWithoutPlan(2)).toBe(true);
+
+    state.subscriptions.set("org_1", stripeSub({ status: "trialing" }));
+    await usageService.refreshOrganization("org_1");
+
+    expect(usageService.isSiteWithoutPlan(2)).toBe(false);
+    // Pro includes replays, so the plan block on replays lifts too.
+    expect(usageService.isSiteWithoutReplay(2)).toBe(false);
+  });
+
+  it("refreshOrganization blocks a new site in an org with no plan before the next cron run", async () => {
+    await usageService.refreshOrganization("org_1");
+
+    expect(usageService.isSiteWithoutPlan(1)).toBe(false);
+    expect(usageService.isSiteWithoutPlan(2)).toBe(true);
+    expect(usageService.isSiteWithoutReplay(2)).toBe(true);
+  });
+
+  it("refreshOrganization keeps a replay quota the last cron run found exhausted", async () => {
+    state.subscriptions.set("org_1", stripeSub());
+    state.replayCounts = [{ site_id: 2, count: "1000" }];
+    await usageService.updateOrganizationsMonthlyUsage();
+    expect(usageService.isSiteWithoutReplay(2)).toBe(true);
+
+    await usageService.refreshOrganization("org_1");
+
+    expect(usageService.isSiteWithoutReplay(2)).toBe(true);
+  });
+
+  it("refreshOrganization leaves the blocks alone when the plan can't be resolved", async () => {
+    await usageService.updateOrganizationsMonthlyUsage();
+    state.subscriptions.set("org_1", new Error("db down"));
+
+    await expect(usageService.refreshOrganization("org_1")).rejects.toThrow("db down");
+    expect(usageService.isSiteWithoutPlan(2)).toBe(true);
+  });
+
+  it("does not let a cron run that started before a refresh overwrite it with older data", async () => {
+    // The cron resolves the org as free, then waits on the email/database work while
+    // checkout completes and a refresh unblocks the site.
+    state.organizations = [org("org_1", { stripeCustomerId: null, overMonthlyLimit: false })];
+    let releaseCron!: () => void;
+    const cronPaused = new Promise<void>(resolve => (releaseCron = resolve));
+    mocks.getAllStripeSubscriptionsByCustomer.mockImplementation(async () => {
+      await cronPaused;
+      return new Map();
+    });
+
+    const cronRun = usageService.updateOrganizationsMonthlyUsage();
+    state.subscriptions.set("org_1", stripeSub({ status: "trialing" }));
+    vi.setSystemTime(Date.now() + 1_000);
+    await usageService.refreshOrganization("org_1");
+    state.subscriptions.set("org_1", freeSub());
+    releaseCron();
+    await cronRun;
+
+    expect(usageService.isSiteWithoutPlan(2)).toBe(false);
+  });
+
+  it("runs overlapping refreshes one after another, so an older one can't undo a newer one", async () => {
+    // A site-create refresh reads "free" and stalls on its site query while checkout's
+    // refresh starts; the checkout refresh must be the one that sticks.
+    const firstRefresh = usageService.refreshOrganization("org_1");
+    state.subscriptions.set("org_1", stripeSub({ status: "trialing" }));
+    const secondRefresh = usageService.refreshOrganization("org_1");
+
+    await Promise.all([firstRefresh, secondRefresh]);
+
+    expect(usageService.isSiteWithoutPlan(2)).toBe(false);
+  });
+
+  describe("after an unpaid trial", () => {
+    const graceSub = (endsAt: Date): SubscriptionInfo => ({
+      source: "free",
+      planName: "free",
+      status: "free",
+      periodStart: "2026-08-01",
+      eventLimit: 100_000,
+      trialGrace: {
+        subscriptionId: "sub_trial",
+        planName: "standard100k",
+        trialEndedAt: new Date("2026-07-30T00:00:00Z"),
+        endsAt,
+        retryingPayment: false,
+      },
+    });
+
+    it("keeps every site collecting on the trial's limit and hands the org to the grace emails", async () => {
+      const subscription = graceSub(new Date("2026-09-28T00:00:00Z"));
+      state.subscriptions.set("org_1", subscription);
+      state.eventCounts = [{ site_id: 2, count: "50000" }];
+
+      await usageService.updateOrganizationsMonthlyUsage();
+
+      expect(usageService.getSitesWithoutPlan().size).toBe(0);
+      expect(usageService.isSiteOverLimit(2)).toBe(false);
+      expect(mocks.sendTrialGraceDue).toHaveBeenCalledWith(
+        expect.objectContaining({ id: "org_1" }),
+        (subscription as Extract<SubscriptionInfo, { source: "free" }>).trialGrace,
+        [expect.objectContaining({ siteId: 1, domain: "1" }), expect.objectContaining({ siteId: 2, domain: "2" })]
+      );
+    });
+
+    it("switches the sites off once the grace period is over", async () => {
+      state.subscriptions.set("org_1", graceSub(new Date("2026-08-01T00:00:00Z")));
+
+      await usageService.updateOrganizationsMonthlyUsage();
+
+      expect(usageService.isSiteWithoutPlan(2)).toBe(true);
+    });
+
+    it("still applies the blocks when the grace email fails", async () => {
+      state.subscriptions.set("org_1", graceSub(new Date("2026-09-28T00:00:00Z")));
+      mocks.sendTrialGraceDue.mockRejectedValue(new Error("resend down"));
+
+      await usageService.updateOrganizationsMonthlyUsage();
+
+      expect(state.updates).toHaveLength(1);
+      expect(usageService.isSiteWithoutPlan(2)).toBe(false);
+    });
+  });
+
+  it("never blocks sites for needing a plan when self-hosted", async () => {
+    state.isCloud = false;
+
+    await usageService.updateOrganizationsMonthlyUsage();
+
+    expect(usageService.getSitesWithoutPlan().size).toBe(0);
   });
 });

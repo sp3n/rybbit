@@ -36,6 +36,7 @@ function trackingRequest(overrides: Partial<TrackingRequest> = {}): TrackingRequ
     headers: {},
     lookupAsn,
     receivedAt: new Date("2026-08-14T10:38:37.000Z"),
+    eventTimeSupplied: false,
     ...overrides,
   };
 }

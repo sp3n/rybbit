@@ -7,6 +7,7 @@ import { useRouter } from "next/navigation";
 import { useState, useCallback, ReactNode } from "react";
 import { toast } from "@/components/ui/sonner";
 
+import { HoldToConfirm } from "@/components/interior/hold-to-confirm";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -23,19 +24,29 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 
 import { deleteSite, moveSite, updateSiteConfig, SiteResponse } from "@/api/admin/endpoints";
+import { adminMoveSite } from "@/api/admin/endpoints/adminSites";
 import { useUserOrganizations } from "@/api/admin/hooks/useOrganizations";
 import { useGetSitesFromOrg } from "@/api/admin/hooks/useSites";
+import { RemoteOrganizationCombobox } from "@/app/admin/components/shared/RemoteOrganizationCombobox";
 import { normalizeDomain } from "@/lib/utils";
 
 import { SettingRow, SettingsSection, SettingsSections } from "./SettingsSection";
+import { TransferSiteSection } from "./TransferSiteSection";
 
 interface GeneralTabProps {
   siteMetadata: SiteResponse;
+  /** No sites:configure: the name, domain and privacy settings are read-only. */
   disabled?: boolean;
+  /** sites:delete on this site. */
+  canDelete?: boolean;
+  /** sites:transfer on this site. */
+  canTransfer?: boolean;
   onClose?: () => void;
   onPublicChange?: (checked: boolean) => void;
+  adminMode?: boolean;
 }
 
 interface ToggleConfig {
@@ -50,9 +61,17 @@ interface ToggleConfig {
   badge?: ReactNode;
 }
 
-export function GeneralTab({ siteMetadata, disabled = false, onClose, onPublicChange }: GeneralTabProps) {
+export function GeneralTab({
+  siteMetadata,
+  disabled = false,
+  canDelete = false,
+  canTransfer = false,
+  onClose,
+  onPublicChange,
+  adminMode = false,
+}: GeneralTabProps) {
   const t = useExtracted();
-  const { refetch } = useGetSitesFromOrg(siteMetadata?.organizationId ?? "");
+  const { refetch } = useGetSitesFromOrg(siteMetadata?.organizationId ?? "", { enabled: !adminMode });
   const { data: userOrganizations } = useUserOrganizations();
   const queryClient = useQueryClient();
   const router = useRouter();
@@ -67,12 +86,13 @@ export function GeneralTab({ siteMetadata, disabled = false, onClose, onPublicCh
   const [isChangingDomain, setIsChangingDomain] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const [targetOrgId, setTargetOrgId] = useState("");
+  const [targetOrgName, setTargetOrgName] = useState("");
   const [isMoving, setIsMoving] = useState(false);
 
-  // Organizations the user can move the site into: those they administer,
-  // excluding the site's current organization.
+  // Organizations the user can move the site into: those they may create
+  // sites in, excluding the site's current organization.
   const moveTargets = (userOrganizations ?? []).filter(
-    org => (org.role === "admin" || org.role === "owner") && org.id !== siteMetadata.organizationId
+    org => org.permissions?.includes("sites:create") && org.id !== siteMetadata.organizationId
   );
 
   const [toggleStates, setToggleStates] = useState({
@@ -84,6 +104,20 @@ export function GeneralTab({ siteMetadata, disabled = false, onClose, onPublicCh
   });
 
   const [loadingStates, setLoadingStates] = useState<Record<string, boolean>>({});
+  const refreshSiteLists = useCallback(() => {
+    if (adminMode) {
+      queryClient.invalidateQueries({ queryKey: ["admin-organizations"] });
+    } else {
+      refetch();
+    }
+  }, [adminMode, queryClient, refetch]);
+
+  // After an edit: the header, site selector and this dialog read the single-site query, not the
+  // lists. Prefix match so both string- and number-keyed useGetSite instances update.
+  const refreshSite = useCallback(() => {
+    refreshSiteLists();
+    queryClient.invalidateQueries({ queryKey: ["get-site"] });
+  }, [queryClient, refreshSiteLists]);
 
   const handleTypeChange = async (type: "web" | "mobile" | "game") => {
     const previousType = newType;
@@ -120,7 +154,7 @@ export function GeneralTab({ siteMetadata, disabled = false, onClose, onPublicCh
             : successMessage.disabled
           : `${key.replace(/([A-Z])/g, " $1").toLowerCase()} ${checked ? "enabled" : "disabled"}`;
         toast.success(message);
-        refetch();
+        refreshSite();
       } catch (error) {
         console.error(`Error updating ${key}:`, error);
         toast.error(`Failed to update ${key.replace(/([A-Z])/g, " $1").toLowerCase()}`);
@@ -129,7 +163,7 @@ export function GeneralTab({ siteMetadata, disabled = false, onClose, onPublicCh
         setLoadingStates(prev => ({ ...prev, [key]: false }));
       }
     },
-    [siteMetadata.siteId, refetch, onPublicChange]
+    [siteMetadata.siteId, onPublicChange, refreshSite]
   );
 
   const handleNameChange = async () => {
@@ -143,7 +177,7 @@ export function GeneralTab({ siteMetadata, disabled = false, onClose, onPublicCh
       await updateSiteConfig(siteMetadata.siteId, { name: newName.trim() });
       toast.success(t("Name updated successfully"));
       router.refresh();
-      refetch();
+      refreshSite();
     } catch (error) {
       console.error("Error changing name:", error);
       toast.error(t("Failed to update name"));
@@ -170,7 +204,7 @@ export function GeneralTab({ siteMetadata, disabled = false, onClose, onPublicCh
             : t("Domain updated successfully")
       );
       router.refresh();
-      refetch();
+      refreshSite();
     } catch (error) {
       console.error("Error changing domain:", error);
       toast.error(t("Failed to update domain"));
@@ -180,19 +214,20 @@ export function GeneralTab({ siteMetadata, disabled = false, onClose, onPublicCh
   };
 
   const handleDelete = async () => {
+    setIsDeleting(true);
     try {
-      setIsDeleting(true);
       await deleteSite(siteMetadata.siteId);
-      toast.success(t("Site deleted successfully"));
-      router.push("/");
-      onClose?.();
-      refetch();
     } catch (error) {
       console.error("Error deleting site:", error);
       toast.error(t("Failed to delete site"));
-    } finally {
       setIsDeleting(false);
+      return;
     }
+    // Stays pending on success: the dialog closes and we navigate away, so the button must not re-arm meanwhile.
+    toast.success(t("Site deleted successfully"));
+    router.push("/");
+    onClose?.();
+    refreshSiteLists();
   };
 
   const handleMove = async () => {
@@ -202,13 +237,17 @@ export function GeneralTab({ siteMetadata, disabled = false, onClose, onPublicCh
 
     try {
       setIsMoving(true);
-      await moveSite(siteMetadata.siteId, targetOrgId);
+      await (adminMode ? adminMoveSite(siteMetadata.siteId, targetOrgId) : moveSite(siteMetadata.siteId, targetOrgId));
       toast.success(t("Site moved successfully"));
       queryClient.invalidateQueries({ queryKey: ["get-sites-from-org"] });
       queryClient.invalidateQueries({ queryKey: ["get-site", siteMetadata.siteId] });
       setTargetOrgId("");
+      setTargetOrgName("");
       router.refresh();
-      refetch();
+      refreshSiteLists();
+      if (adminMode) {
+        onClose?.();
+      }
     } catch (error) {
       console.error("Error moving site:", error);
       toast.error(error instanceof Error ? error.message : t("Failed to move site"));
@@ -303,9 +342,11 @@ export function GeneralTab({ siteMetadata, disabled = false, onClose, onPublicCh
             <Button
               variant="outline"
               onClick={handleNameChange}
-              disabled={isChangingName || newName === siteMetadata.name || disabled}
+              loading={isChangingName}
+              loadingLabel={t("Updating...")}
+              disabled={newName === siteMetadata.name || disabled}
             >
-              {isChangingName ? t("Updating...") : t("Update")}
+              {t("Update")}
             </Button>
           </div>
         </div>
@@ -336,9 +377,11 @@ export function GeneralTab({ siteMetadata, disabled = false, onClose, onPublicCh
             <Button
               variant="outline"
               onClick={handleDomainChange}
-              disabled={isChangingDomain || newDomain === siteMetadata.domain || disabled}
+              loading={isChangingDomain}
+              loadingLabel={t("Updating...")}
+              disabled={newDomain === siteMetadata.domain || disabled}
             >
-              {isChangingDomain ? t("Updating...") : t("Update")}
+              {t("Update")}
             </Button>
           </div>
         </div>
@@ -365,7 +408,7 @@ export function GeneralTab({ siteMetadata, disabled = false, onClose, onPublicCh
         ))}
       </SettingsSection>
 
-      {!disabled && moveTargets.length > 0 && (
+      {canTransfer && (adminMode || moveTargets.length > 0) && (
         <SettingsSection
           title={t("Move to Organization")}
           description={t(
@@ -373,22 +416,36 @@ export function GeneralTab({ siteMetadata, disabled = false, onClose, onPublicCh
           )}
         >
           <div className="flex gap-2">
-            <Select value={targetOrgId} onValueChange={setTargetOrgId}>
-              <SelectTrigger className="flex-1">
-                <SelectValue placeholder={t("Select an organization")} />
-              </SelectTrigger>
-              <SelectContent>
-                {moveTargets.map(org => (
-                  <SelectItem key={org.id} value={org.id}>
-                    {org.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            <div className="min-w-0 flex-1">
+              {adminMode ? (
+                <RemoteOrganizationCombobox
+                  value={targetOrgId}
+                  selectedName={targetOrgName}
+                  excludeId={siteMetadata.organizationId ?? undefined}
+                  onSelect={organization => {
+                    setTargetOrgId(organization.id);
+                    setTargetOrgName(organization.name);
+                  }}
+                />
+              ) : (
+                <Select value={targetOrgId} onValueChange={setTargetOrgId}>
+                  <SelectTrigger className="w-full">
+                    <SelectValue placeholder={t("Select an organization")} />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {moveTargets.map(org => (
+                      <SelectItem key={org.id} value={org.id}>
+                        {org.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
+            </div>
             <AlertDialog>
               <AlertDialogTrigger asChild>
-                <Button variant="outline" disabled={!targetOrgId || isMoving}>
-                  {isMoving ? t("Moving...") : t("Move")}
+                <Button variant="outline" loading={isMoving} loadingLabel={t("Moving...")} disabled={!targetOrgId}>
+                  {t("Move")}
                 </Button>
               </AlertDialogTrigger>
               <AlertDialogContent>
@@ -399,15 +456,16 @@ export function GeneralTab({ siteMetadata, disabled = false, onClose, onPublicCh
                       'This will move "{siteName}" to {orgName}. Team and restricted member access for this site will be reset, and members of the current organization may lose access.',
                       {
                         siteName: siteMetadata.name,
-                        orgName: moveTargets.find(org => org.id === targetOrgId)?.name ?? "",
+                        orgName: targetOrgName || moveTargets.find(org => org.id === targetOrgId)?.name || targetOrgId,
                       }
                     )}
                   </AlertDialogDescription>
                 </AlertDialogHeader>
                 <AlertDialogFooter>
                   <AlertDialogCancel>{t("Cancel")}</AlertDialogCancel>
+                  {/* Closes on click; the Move button shows the request as it runs. */}
                   <AlertDialogAction onClick={handleMove} disabled={isMoving}>
-                    {isMoving ? t("Moving...") : t("Yes, move site")}
+                    {t("Yes, move site")}
                   </AlertDialogAction>
                 </AlertDialogFooter>
               </AlertDialogContent>
@@ -415,6 +473,9 @@ export function GeneralTab({ siteMetadata, disabled = false, onClose, onPublicCh
           </div>
         </SettingsSection>
       )}
+
+      {/* A person-to-person hand-off; the admin panel moves sites directly instead. */}
+      {canTransfer && !adminMode && <TransferSiteSection siteId={siteMetadata.siteId} />}
 
       <SettingsSection>
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-red-200 px-4 py-3 dark:border-red-500/25">
@@ -425,13 +486,32 @@ export function GeneralTab({ siteMetadata, disabled = false, onClose, onPublicCh
             </p>
           </div>
           <AlertDialog>
-            <AlertDialogTrigger asChild>
-              <Button variant="destructive" disabled={disabled}>
-                <AlertTriangle className="h-4 w-4" />
-                {t("Delete Site")}
-              </Button>
-            </AlertDialogTrigger>
-            <AlertDialogContent>
+            {canDelete ? (
+              <AlertDialogTrigger asChild>
+                <Button variant="destructive">
+                  <AlertTriangle className="h-4 w-4" />
+                  {t("Delete Site")}
+                </Button>
+              </AlertDialogTrigger>
+            ) : (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  {/* A disabled button gets no pointer events, so the tooltip hangs off this wrapper. */}
+                  <span tabIndex={0} className="inline-flex">
+                    <Button variant="destructive" disabled>
+                      <AlertTriangle className="h-4 w-4" />
+                      {t("Delete Site")}
+                    </Button>
+                  </span>
+                </TooltipTrigger>
+                <TooltipContent>{t("Your role can't delete sites")}</TooltipContent>
+              </Tooltip>
+            )}
+            <AlertDialogContent
+              onEscapeKeyDown={event => {
+                if (isDeleting) event.preventDefault();
+              }}
+            >
               <AlertDialogHeader>
                 <AlertDialogTitle>{t("Are you absolutely sure?")}</AlertDialogTitle>
                 <AlertDialogDescription>
@@ -442,10 +522,10 @@ export function GeneralTab({ siteMetadata, disabled = false, onClose, onPublicCh
                 </AlertDialogDescription>
               </AlertDialogHeader>
               <AlertDialogFooter>
-                <AlertDialogCancel>{t("Cancel")}</AlertDialogCancel>
-                <AlertDialogAction onClick={handleDelete} disabled={isDeleting} variant="destructive">
-                  {isDeleting ? t("Deleting...") : t("Yes, delete site")}
-                </AlertDialogAction>
+                <AlertDialogCancel disabled={isDeleting}>{t("Cancel")}</AlertDialogCancel>
+                <HoldToConfirm onConfirm={handleDelete} pending={isDeleting} pendingLabel={t("Deleting...")}>
+                  {t("Hold to delete site")}
+                </HoldToConfirm>
               </AlertDialogFooter>
             </AlertDialogContent>
           </AlertDialog>

@@ -4,7 +4,13 @@ import { getOverviewBucketed } from "../getOverviewBucketed.js";
 import { TimeBucket } from "../types.js";
 import { resolveTimeWindow } from "../utils/timeWindow.js";
 import { analyticsRoute, runAnalyticsQuery } from "../utils/analyticsQuery.js";
-import { getLiteSessionFilter, hasLiteDatetimeRange, hasLiteFilters, liteBucket } from "./utils.js";
+import {
+  getLiteSessionFilter,
+  hasLiteDatetimeRange,
+  hasLiteFilters,
+  hasLiteRealtimeRange,
+  liteBucket,
+} from "./utils.js";
 
 type GetOverviewBucketedLiteResponse = {
   time: string;
@@ -73,14 +79,13 @@ function buildHourBucketQuery(args: {
       ORDER BY time ${fill}
     ) s USING time
     ORDER BY time
+    -- Without nullable join results a bucket missing from p reads as
+    -- 1970-01-01 rather than NULL, and the coalesces above never fall back.
+    SETTINGS join_use_nulls = 1
   `;
 }
 
-function buildDayBucketQuery(args: {
-  bucketed: (column: string) => string;
-  sessionTime: string;
-  fill: string;
-}) {
+function buildDayBucketQuery(args: { bucketed: (column: string) => string; sessionTime: string; fill: string }) {
   const { bucketed, sessionTime, fill } = args;
   // Aggregate in the inner GROUP BY, then compose ratios in the outer SELECT.
   // Aliasing `sum(sessions) AS sessions` would shadow the column inside the
@@ -171,8 +176,8 @@ export const getOverviewBucketedLite = analyticsRoute<GetOverviewBucketedLiteReq
   async (req: FastifyRequest<GetOverviewBucketedLiteRequest>, res: FastifyReply) => {
     const site = Number(req.params.siteId);
 
-    // The hourly rollups can't express a sub-hour window.
-    if (hasLiteDatetimeRange(req.query)) {
+    // Hourly rollups can't represent exact or short rolling windows.
+    if (hasLiteDatetimeRange(req.query) || hasLiteRealtimeRange(req.query)) {
       return getOverviewBucketed(req, res);
     }
 

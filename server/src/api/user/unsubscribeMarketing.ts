@@ -3,8 +3,8 @@ import { eq } from "drizzle-orm";
 import { DateTime } from "luxon";
 import { db } from "../../db/postgres/postgres.js";
 import { user } from "../../db/postgres/schema.js";
-import { unsubscribeContact, cancelScheduledEmail } from "../../lib/email/email.js";
-import { onboardingTipsService } from "../../services/onboardingTips/onboardingTipsService.js";
+import { unsubscribeContact } from "../../lib/email/email.js";
+import { verifyExpiringPayload } from "../../lib/signedToken.js";
 
 // Authenticated user unsubscribe
 export const unsubscribeMarketing = async (request: FastifyRequest, reply: FastifyReply) => {
@@ -18,7 +18,6 @@ export const unsubscribeMarketing = async (request: FastifyRequest, reply: Fasti
     const [userData] = await db
       .select({
         email: user.email,
-        scheduledTipEmailIds: user.scheduledTipEmailIds,
       })
       .from(user)
       .where(eq(user.id, userId));
@@ -26,19 +25,6 @@ export const unsubscribeMarketing = async (request: FastifyRequest, reply: Fasti
     if (!userData) {
       return reply.status(404).send({ error: "User not found" });
     }
-
-    // Cancel scheduled tip emails
-    const emailIds = (userData.scheduledTipEmailIds as string[]) || [];
-    await onboardingTipsService.cancelScheduledEmails(emailIds);
-
-    // Clear the scheduled email IDs
-    await db
-      .update(user)
-      .set({
-        scheduledTipEmailIds: [],
-        updatedAt: DateTime.now().toISO(),
-      })
-      .where(eq(user.id, userId));
 
     // Mark contact as unsubscribed in Resend
     await unsubscribeContact(userData.email);
@@ -53,13 +39,31 @@ export const unsubscribeMarketing = async (request: FastifyRequest, reply: Fasti
 // One-click unsubscribe handler
 // GET: User clicks link in email - show confirmation page
 // POST: Email client's List-Unsubscribe-Post - return 200 OK
+// If the unsubscribe can't be recorded, both return a 500: neither the reader nor the email
+// client is told it worked, and the client can try again.
+// Unsigned links are honored only until this date: emails sent before link
+// signing existed (2026-09) carry no signature, and unsubscribe links must
+// keep working for a while. After the cutoff every link must carry a valid
+// signed (email, exp) pair, closing the unsubscribe-anyone hole for good.
+const LEGACY_UNSIGNED_CUTOFF = DateTime.fromISO("2026-12-01T00:00:00Z");
+
 export const oneClickUnsubscribeMarketing = async (
-  request: FastifyRequest<{ Querystring: { email?: string } }>,
+  request: FastifyRequest<{ Querystring: { email?: string; exp?: string; sig?: string } }>,
   reply: FastifyReply
 ) => {
   try {
     const email = request.query.email;
+    const { exp, sig } = request.query;
     const isGetRequest = request.method === "GET";
+
+    if (email) {
+      const validSignature = !!(sig && exp) && verifyExpiringPayload(`unsubscribe:${email}`, exp, sig);
+      const legacyWindowOpen = DateTime.utc() < LEGACY_UNSIGNED_CUTOFF;
+      const acceptableLegacy = !sig && !exp && legacyWindowOpen;
+      if (!validSignature && !acceptableLegacy) {
+        return reply.status(400).send({ error: "Invalid or expired unsubscribe link" });
+      }
+    }
 
     if (!email) {
       if (isGetRequest) {
@@ -73,30 +77,6 @@ export const oneClickUnsubscribeMarketing = async (
         `);
       }
       return reply.status(400).send({ error: "Email is required" });
-    }
-
-    // Find user by email
-    const [userData] = await db
-      .select({
-        id: user.id,
-        scheduledTipEmailIds: user.scheduledTipEmailIds,
-      })
-      .from(user)
-      .where(eq(user.email, email));
-
-    if (userData) {
-      // Cancel scheduled tip emails
-      const emailIds = (userData.scheduledTipEmailIds as string[]) || [];
-      await onboardingTipsService.cancelScheduledEmails(emailIds);
-
-      // Clear the scheduled email IDs
-      await db
-        .update(user)
-        .set({
-          scheduledTipEmailIds: [],
-          updatedAt: DateTime.now().toISO(),
-        })
-        .where(eq(user.id, userData.id));
     }
 
     // Mark contact as unsubscribed in Resend (even if user not found in our DB)
@@ -119,7 +99,16 @@ export const oneClickUnsubscribeMarketing = async (
     return reply.status(200).send();
   } catch (error) {
     request.log.error({ err: error }, "Error in one-click unsubscribe");
-    // Still return 200 to not confuse email clients
-    return reply.status(200).send();
+    if (request.method === "GET") {
+      return reply.status(500).type("text/html").send(`
+        <!DOCTYPE html>
+        <html><head><title>Unsubscribe - Rybbit</title></head>
+        <body style="font-family: sans-serif; max-width: 600px; margin: 50px auto; text-align: center;">
+          <h1>Something went wrong</h1>
+          <p>We couldn't unsubscribe you just now. Please try the link again in a few minutes.</p>
+        </body></html>
+      `);
+    }
+    return reply.status(500).send({ error: "Failed to unsubscribe" });
   }
 };

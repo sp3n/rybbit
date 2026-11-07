@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { buildTrackingScriptSnippet, getTrackingScriptDataAttributes } from "./trackingScriptSnippet";
+import {
+  buildTrackingScriptSnippet,
+  getTrackingScriptDataAttributes,
+  getTrackingScriptUrl,
+} from "./trackingScriptSnippet";
 
 describe("trackingScriptSnippet", () => {
   afterEach(() => {
@@ -24,8 +28,8 @@ describe("trackingScriptSnippet", () => {
       })
     );
 
+    expect(attributes).not.toHaveProperty("data-site-id");
     expect(attributes).toMatchObject({
-      "data-site-id": "site_abc",
       "data-session-replay": "true",
       "data-web-vitals": "true",
       "data-track-errors": "true",
@@ -40,6 +44,21 @@ describe("trackingScriptSnippet", () => {
     });
   });
 
+  it("writes the URL-fragment attribute only when fragment tracking is on", () => {
+    expect(Object.fromEntries(getTrackingScriptDataAttributes({ siteId: 1 }))).not.toHaveProperty(
+      "data-track-url-fragments"
+    );
+    expect(Object.fromEntries(getTrackingScriptDataAttributes({ siteId: 1, trackUrlFragments: true }))).toMatchObject({
+      "data-track-url-fragments": "true",
+    });
+  });
+
+  it("passes the site ID in the script URL", () => {
+    vi.stubGlobal("location", { origin: "https://analytics.example.com" });
+    expect(getTrackingScriptUrl({ id: "site abc" })).toBe("https://analytics.example.com/api/script.js?siteId=site%20abc");
+    expect(getTrackingScriptUrl({ siteId: 7 })).toBe("https://analytics.example.com/api/script.js?siteId=7");
+  });
+
   it("includes optional runtime settings in every generated snippet", () => {
     vi.stubGlobal("location", { origin: "https://analytics.example.com" });
     const snippet = buildTrackingScriptSnippet(
@@ -47,6 +66,8 @@ describe("trackingScriptSnippet", () => {
       { debounceValue: 750, skipPatterns: ["/admin/**"], maskPatterns: ["/orders/**"] }
     );
 
+    expect(snippet).toContain('src="https://analytics.example.com/api/script.js?siteId=42"');
+    expect(snippet).not.toContain("data-site-id");
     expect(snippet).toContain('data-debounce="750"');
     expect(snippet).toContain("data-skip-patterns='[\"/admin/**\"]'");
     expect(snippet).toContain("data-mask-patterns='[\"/orders/**\"]'");

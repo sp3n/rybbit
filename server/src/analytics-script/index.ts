@@ -15,8 +15,22 @@ declare global {
   }
 }
 
+function hasOptedOut(optOutKey: string): boolean {
+  if (window.__RYBBIT_OPTOUT__) return true;
+  try {
+    return localStorage.getItem(optOutKey) !== null;
+  } catch {
+    // Storage is blocked (cookies disabled, sandboxed iframe): not opted out.
+    return false;
+  }
+}
+
 (async function () {
-  const scriptTag = document.currentScript as HTMLScriptElement;
+  // Script optimizers that re-inject the tag can leave `document.currentScript`
+  // null; fall back to locating our own tag by its URL.
+  const scriptTag =
+    (document.currentScript as HTMLScriptElement | null) ||
+    document.querySelector<HTMLScriptElement>('script[src*="/script.js"]');
   if (!scriptTag) {
     console.error("Could not find current script tag");
     return;
@@ -27,7 +41,7 @@ declare global {
   const optOutKey = `disable-${namespace}`;
 
   // Check if user has opted out
-  if (window.__RYBBIT_OPTOUT__ || localStorage.getItem(optOutKey) !== null) {
+  if (hasOptedOut(optOutKey)) {
     // Create no-op implementation
     window[namespace] = {
       pageview: () => {},
@@ -139,7 +153,7 @@ declare global {
   }
 
   // Create debounced pageview tracker
-  const trackPageview = () => tracker.trackPageview();
+  const trackPageview = () => tracker.trackPageviewIfUrlChanged();
   const debouncedTrackPageview =
     config!.debounceDuration > 0 ? debounce(trackPageview, config!.debounceDuration) : trackPageview;
 
@@ -235,11 +249,12 @@ declare global {
   // Initialize
   setupEventListeners();
 
-  // Setup cleanup on page unload
+  // Setup cleanup on page unload. Session replay is left running: it flushes
+  // itself on page hide, and beforeunload also fires for pages that stay (a
+  // cancelled leave prompt, a download link) or come back from the bfcache.
   window.addEventListener("beforeunload", () => {
     clickManager?.cleanup();
     copyManager?.cleanup();
-    tracker.cleanup();
   });
 
   // Track initial pageview if enabled

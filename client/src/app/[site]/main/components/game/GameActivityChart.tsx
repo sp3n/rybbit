@@ -55,7 +55,8 @@ export function GameActivityChart({
       });
     });
 
-    const { min: previousMin } = getChartTimeBounds(previousTime, bucket, timezone);
+    // No previous period (e.g. all time) leaves nothing to align the comparison against.
+    const previousMin = previousTime ? getChartTimeBounds(previousTime, bucket, timezone).min : undefined;
     const offset = min && previousMin ? min.getTime() - previousMin.getTime() : 0;
     const previousPoints: PreviousPoint[] = [];
 

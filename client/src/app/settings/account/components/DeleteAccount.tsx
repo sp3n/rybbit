@@ -4,10 +4,10 @@ import { useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle } from "lucide-react";
 import { useExtracted } from "next-intl";
 import { useState } from "react";
+import { HoldToConfirm } from "@/components/interior/hold-to-confirm";
 import { toast } from "@/components/ui/sonner";
 import {
   AlertDialog,
-  AlertDialogAction,
   AlertDialogCancel,
   AlertDialogContent,
   AlertDialogDescription,
@@ -19,58 +19,82 @@ import {
 import { Button } from "../../../../components/ui/button";
 import { authClient } from "../../../../lib/auth";
 import { useStripeSubscription } from "../../../../lib/subscription/useStripeSubscription";
+import { useUserOrganizations } from "../../../../api/admin/hooks/useOrganizations";
+
+/**
+ * Whether to remind the user to cancel the active organization's plan before deleting their
+ * account: they own it and a Stripe plan will renew. Only a hint; the server decides, refusing
+ * only when the user is the last owner of an organization whose subscription will still charge
+ * (it also knows about cancellations scheduled for a date, which this data doesn't carry).
+ */
+export function useHasActiveSubscription() {
+  const { data: subscription } = useStripeSubscription();
+  const { data: session } = authClient.useSession();
+  const { data: organizations } = useUserOrganizations({ enabled: !!session?.user });
+  const activeRole = organizations?.find(org => org.id === session?.session.activeOrganizationId)?.role;
+  // Any Stripe plan (Basic and legacy prices included) that will renew.
+  return activeRole === "owner" && !!subscription?.id && !subscription.cancelAtPeriodEnd;
+}
 
 export function DeleteAccount() {
-  const { data: subscription } = useStripeSubscription();
   const [isDeleting, setIsDeleting] = useState(false);
   const [isOpen, setIsOpen] = useState(false);
   const queryClient = useQueryClient();
   const t = useExtracted();
 
   const handleAccountDeletion = async () => {
+    setIsDeleting(true);
     try {
-      setIsDeleting(true);
       const response = await authClient.deleteUser();
 
       if (response.error) {
         toast.error(t("Failed to delete account: {error}", { error: response.error.message || t("Unknown error") }));
+        setIsDeleting(false);
         return;
       }
-      queryClient.clear();
-      toast.success(t("Account successfully deleted"));
-      setIsOpen(false);
-      window.location.reload();
     } catch (error) {
       toast.error(t("Failed to delete account: {error}", { error: String(error) }));
-    } finally {
       setIsDeleting(false);
+      return;
     }
+    // Stays pending through the reload, so the button doesn't re-arm on the way out.
+    queryClient.clear();
+    toast.success(t("Account successfully deleted"));
+    setIsOpen(false);
+    window.location.reload();
   };
 
   const handleClose = () => {
     setIsOpen(false);
   };
 
-  const accountNotDeletable =
-    isDeleting || subscription?.planName.startsWith("standard") || subscription?.planName.startsWith("pro");
-
   return (
-    <AlertDialog open={isOpen} onOpenChange={setIsOpen}>
+    <AlertDialog
+      open={isOpen}
+      onOpenChange={open => {
+        if (!isDeleting) setIsOpen(open);
+      }}
+    >
       <AlertDialogTrigger asChild>
-        <Button variant="destructive" className="w-full" onClick={() => setIsOpen(true)}>
-          {t("Delete Account")}
+        <Button
+          variant="ghost"
+          size="sm"
+          className="text-red-600 hover:bg-red-500/10 hover:text-red-600 dark:text-red-400 dark:hover:bg-red-500/10 dark:hover:text-red-400"
+          onClick={() => setIsOpen(true)}
+        >
+          {t("Delete account")}
         </Button>
       </AlertDialogTrigger>
       <AlertDialogContent>
         <AlertDialogHeader>
           <AlertDialogTitle className="flex items-center gap-2">
             <AlertTriangle className="h-5 w-5" color="hsl(var(--red-500))" />
-            {accountNotDeletable ? t("Cannot delete account") : t("Delete your account?")}
+            {t("Delete your account?")}
           </AlertDialogTitle>
           <AlertDialogDescription>
-            {accountNotDeletable
-              ? t("You have an active subscription. Please cancel your subscription before deleting your account.")
-              : t("This action cannot be undone. This will permanently delete your account and remove all your data from our servers.")}
+            {t(
+              "This action cannot be undone. This will permanently delete your account and remove all your data from our servers."
+            )}
           </AlertDialogDescription>
         </AlertDialogHeader>
 
@@ -78,18 +102,9 @@ export function DeleteAccount() {
           <AlertDialogCancel onClick={handleClose} disabled={isDeleting}>
             {t("Cancel")}
           </AlertDialogCancel>
-          {!accountNotDeletable && (
-            <AlertDialogAction
-              onClick={e => {
-                e.preventDefault();
-                handleAccountDeletion();
-              }}
-              variant="destructive"
-              disabled={isDeleting}
-            >
-              {isDeleting ? t("Deleting...") : t("Delete Account")}
-            </AlertDialogAction>
-          )}
+          <HoldToConfirm onConfirm={handleAccountDeletion} pending={isDeleting} pendingLabel={t("Deleting...")}>
+            {t("Hold to delete account")}
+          </HoldToConfirm>
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>

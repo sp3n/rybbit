@@ -2,6 +2,7 @@ import UAParser, { UAParser as userAgentParser } from "ua-parser-js";
 import { userIdService } from "../userId/userIdService.js";
 import type { TrackingRequest } from "./trackingRequest.js";
 import { TrackingPayload } from "./types.js";
+import type { GeoOverride } from "./geoOverride.js";
 
 export type TotalTrackingPayload = TrackingPayload & {
   userId: string; // Always the device fingerprint
@@ -22,6 +23,9 @@ export type TotalTrackingPayload = TrackingPayload & {
   ttfb?: number;
   tag?: string;
   feature_flags?: Record<string, string>;
+  visitor_id?: string;
+  /** sp3n/rybbit fork: a trusted caller's geography; wins over the IP lookup per field. */
+  geoOverride?: GeoOverride;
 };
 
 // ua-parser-js is regex-heavy and runs on every event. User-agent strings repeat
@@ -119,7 +123,14 @@ export function clearSelfReferrer(referrer: string, hostname: string): string {
  */
 export async function createBasePayload(trackingRequest: TrackingRequest): Promise<TotalTrackingPayload> {
   const { payload, site, ipAddress, userAgent } = trackingRequest;
-  const { ip_address: _ipAddressOverride, user_agent: _userAgentOverride, ...payloadBody } = payload;
+  const {
+    ip_address: _ipAddressOverride,
+    user_agent: _userAgentOverride,
+    timestamp: _timestampOverride,
+    event_id: _eventId,
+    geo: _geo,
+    ...payloadBody
+  } = payload;
 
   const anonymousId = payload.anonymous_id
     ? await userIdService.generateUserIdFromClientId(payload.anonymous_id, site.siteId, {
@@ -155,5 +166,29 @@ export async function createBasePayload(trackingRequest: TrackingRequest): Promi
     userId: anonymousId, // Always the device fingerprint
     identifiedUserId: identifiedUserId, // Custom user ID when identified
     storeIp: site.trackIp,
+    geoOverride: trackingRequest.geoOverride,
   } as any;
 }
+
+// The props column is ClickHouse JSON, which only accepts objects. Validation
+// lets any JSON through (e.g. rybbit.event("download", "file.pdf") sends a
+// string), and one non-object row fails the whole insert, so drop those props
+// here and keep the event.
+export function parseEventProperties(properties: string | undefined): Record<string, unknown> | undefined {
+  if (!properties) return undefined;
+  try {
+    const parsed = JSON.parse(properties);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : undefined;
+  } catch (error) {
+    return undefined;
+  }
+}
+
+// A tracking batch mixes every site's events, so one row ClickHouse can't parse
+// must not take the rest down with it. Conflicting paths like {"a.b":1,"a":{"b":2}} are
+// merged instead of rejected, and up to 100 other unparseable rows are skipped.
+// A failure on more rows than that still throws.
+export const EVENTS_INSERT_SETTINGS = {
+  type_json_skip_duplicated_paths: 1,
+  input_format_allow_errors_num: "100",
+};

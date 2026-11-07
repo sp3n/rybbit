@@ -1,9 +1,11 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { EVENT_SCHEMA } from "../../api/analytics/utils/eventSchema.js";
+// Leaf module (constants only), so MCP tests stay hermetic.
+import { QUERY_USER_LIMITS } from "../../db/clickhouse/queryLimits.js";
 import { RybbitApiClient } from "../apiClient.js";
-import { filtersInput, organizationIdInput, siteIdInput, timeInputs } from "../inputs.js";
-import { looseRow, looseRows, ok, readOnly, siteQuery, type ScopeCheck, type ToolGuard } from "./shared.js";
+import { fieldsInput, filtersInput, organizationIdInput, siteIdInput, timeInputs } from "../inputs.js";
+import { looseRow, looseRows, ok, pickRowFields, readOnly, siteQuery, type ScopeCheck, type ToolGuard } from "./shared.js";
 
 const sessionsOutput = z.object({ data: looseRows.optional() }).passthrough();
 
@@ -45,14 +47,21 @@ export function registerRawDataTools(server: McpServer, api: RybbitApiClient, gu
         limit: z.number().int().min(1).max(100).default(20),
         page: z.number().int().min(1).default(1),
         user_id: z.string().optional().describe("Only sessions for this user (device fingerprint id or identified user id)"),
+        fields: fieldsInput,
         ...timeInputs,
         filters: filtersInput,
       },
       outputSchema: sessionsOutput,
       annotations: readOnly,
     },
-    guard(async ({ site_id, limit, page, user_id, ...rest }) =>
-      ok(await api.call("GET", `/sites/${site_id}/sessions`, { query: { limit, page, user_id, ...siteQuery(rest) } }))
+    guard(async ({ site_id, limit, page, user_id, fields, ...rest }) =>
+      ok(
+        pickRowFields(
+          await api.call("GET", `/sites/${site_id}/sessions`, { query: { limit, page, user_id, ...siteQuery(rest) } }),
+          "data",
+          fields
+        )
+      )
     )
   );
 
@@ -90,14 +99,21 @@ export function registerRawDataTools(server: McpServer, api: RybbitApiClient, gu
       inputSchema: {
         site_id: siteIdInput,
         page_size: z.number().int().min(1).max(100).default(20),
+        fields: fieldsInput,
         ...timeInputs,
         filters: filtersInput,
       },
       outputSchema: eventsOutput,
       annotations: readOnly,
     },
-    guard(async ({ site_id, page_size, ...rest }) =>
-      ok(await api.call("GET", `/sites/${site_id}/events`, { query: { page_size, ...siteQuery(rest) } }))
+    guard(async ({ site_id, page_size, fields, ...rest }) =>
+      ok(
+        pickRowFields(
+          await api.call("GET", `/sites/${site_id}/events`, { query: { page_size, ...siteQuery(rest) } }),
+          "data",
+          fields
+        )
+      )
     )
   );
 
@@ -117,7 +133,7 @@ export function registerRawDataTools(server: McpServer, api: RybbitApiClient, gu
           "Rules for run_query SQL:",
           "- The only readable table is scoped_events (pre-filtered to sites the API key can access).",
           "- SELECT or WITH ... SELECT only; ClickHouse syntax; no semicolon.",
-          "- Results are capped at 1000 rows and 10s execution time — aggregate instead of selecting raw rows.",
+          `- Results are capped at ${QUERY_USER_LIMITS.maxResultRows} rows and ${QUERY_USER_LIMITS.maxExecutionTimeSeconds}s execution time — aggregate instead of selecting raw rows.`,
           "- Filter to one site with WHERE site_id = <id>, or pass site_id in the tool call.",
           EVENT_SCHEMA,
         ].join("\n")
@@ -131,7 +147,7 @@ export function registerRawDataTools(server: McpServer, api: RybbitApiClient, gu
     {
       title: "Run custom SQL query",
       description:
-        "Escape hatch for questions the other tools cannot answer: run a read-only ClickHouse SQL query against the scoped_events table. Call get_query_schema first for the schema and rules. Prefer aggregated queries (GROUP BY + LIMIT) — results are capped at 1000 rows.",
+        `Escape hatch for questions the other tools cannot answer: run a read-only ClickHouse SQL query against the scoped_events table. Call get_query_schema first for the schema and rules. Prefer aggregated queries (GROUP BY + LIMIT) — results are capped at ${QUERY_USER_LIMITS.maxResultRows} rows.`,
       inputSchema: {
         organization_id: organizationIdInput,
         query: z.string().min(1).describe("ClickHouse SELECT over scoped_events"),

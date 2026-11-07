@@ -4,11 +4,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   checkApiKey: vi.fn(),
   getSessionFromReq: vi.fn(),
-  getUserHasAccessToSite: vi.fn(),
-  getUserHasAdminAccessToSite: vi.fn(),
-  getUserHasAccessToSitePublic: vi.fn(),
-  getUserIsInOrg: vi.fn(),
+  getUserSiteRole: vi.fn(),
+  getSiteIsPubliclyReadable: vi.fn(),
   getIsUserAdmin: vi.fn(),
+  getUserOrgRole: vi.fn(),
 }));
 
 vi.mock("./auth-utils.js", () => mocks);
@@ -17,14 +16,7 @@ vi.mock("../db/postgres/postgres.js", () => ({
 }));
 vi.mock("./siteConfig.js", () => ({ siteConfig: { resolveSiteId: vi.fn(async () => null) } }));
 
-import {
-  allowPublicSiteAccess,
-  requireAuth,
-  requireOrgMember,
-  requireSiteAccess,
-  requireSiteAdminAccess,
-  resolveSiteId,
-} from "./auth-middleware.js";
+import { requireAuth, requireOrgPermission, requireSitePermission, resolveSiteId } from "./auth-middleware.js";
 import type { ScopeStatements } from "./scopes.js";
 
 const bearer = { authorization: "Bearer rb_key" };
@@ -35,43 +27,47 @@ function bearerResult(statements: ScopeStatements | null, role = "member") {
 
 const invalidResult = { valid: false, role: null, statements: null };
 
-describe("auth middleware scope enforcement", () => {
+describe("permission guards", () => {
   let app: FastifyInstance;
 
   beforeEach(async () => {
     vi.clearAllMocks();
     mocks.getSessionFromReq.mockResolvedValue(null);
-    mocks.getUserHasAccessToSite.mockResolvedValue(false);
-    mocks.getUserHasAdminAccessToSite.mockResolvedValue(false);
-    mocks.getUserHasAccessToSitePublic.mockResolvedValue(false);
-    mocks.getUserIsInOrg.mockResolvedValue(false);
+    mocks.getUserSiteRole.mockResolvedValue(null);
+    mocks.getSiteIsPubliclyReadable.mockResolvedValue(false);
     mocks.getIsUserAdmin.mockResolvedValue(false);
     mocks.checkApiKey.mockResolvedValue(invalidResult);
+    mocks.getUserOrgRole.mockResolvedValue(null);
 
     app = Fastify();
     app.get(
       "/sites/:siteId/goals",
-      { preHandler: [resolveSiteId, requireSiteAccess({ resource: "goals", action: "read" })] as any },
-      async () => ({ ok: true })
+      { preHandler: [resolveSiteId, requireSitePermission("goals:read")] as any },
+      async request => ({ role: request.accessRole ?? null })
     );
     app.post(
       "/sites/:siteId/goals",
-      { preHandler: [resolveSiteId, requireSiteAccess({ resource: "goals", action: "write" })] as any },
+      { preHandler: [resolveSiteId, requireSitePermission("goals:write")] as any },
       async () => ({ ok: true })
     );
     app.delete(
       "/sites/:siteId",
-      { preHandler: [resolveSiteId, requireSiteAdminAccess({ resource: "sites", action: "write" })] as any },
+      { preHandler: [resolveSiteId, requireSitePermission("sites:delete")] as any },
       async () => ({ ok: true })
     );
     app.get(
       "/sites/:siteId/overview",
-      { preHandler: [resolveSiteId, allowPublicSiteAccess({ resource: "analytics", action: "read" })] as any },
+      { preHandler: [resolveSiteId, requireSitePermission("analytics:read", { allowPublic: true })] as any },
       async () => ({ ok: true })
     );
     app.get(
       "/organizations/:organizationId/members",
-      { preHandler: [requireOrgMember({ resource: "org", action: "read" })] as any },
+      { preHandler: [requireOrgPermission("org:read")] as any },
+      async () => ({ ok: true })
+    );
+    app.post(
+      "/organizations/:organizationId/teams",
+      { preHandler: [requireOrgPermission("teams:manage")] as any },
       async () => ({ ok: true })
     );
     app.post("/user/settings", { preHandler: [requireAuth("deny-scoped")] as any }, async () => ({ ok: true }));
@@ -97,6 +93,7 @@ describe("auth middleware scope enforcement", () => {
     const response = await app.inject({ method: "GET", url: "/sites/5/goals", headers: bearer });
 
     expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ role: "member" });
   });
 
   it("treats legacy credentials (null statements) as unrestricted", async () => {
@@ -104,12 +101,13 @@ describe("auth middleware scope enforcement", () => {
 
     expect((await app.inject({ method: "POST", url: "/sites/5/goals", headers: bearer })).statusCode).toBe(200);
     // ...but scopes never elevate: a member-role legacy key still can't hit admin routes.
-    expect((await app.inject({ method: "DELETE", url: "/sites/5", headers: bearer })).statusCode).toBe(403);
+    const deleted = await app.inject({ method: "DELETE", url: "/sites/5", headers: bearer });
+    expect(deleted.statusCode).toBe(403);
+    expect(deleted.json()).toEqual({ error: "Insufficient role", required: "admin" });
   });
 
   it("sessions bypass scopes entirely", async () => {
-    mocks.checkApiKey.mockResolvedValue(invalidResult);
-    mocks.getUserHasAccessToSite.mockResolvedValue(true);
+    mocks.getUserSiteRole.mockResolvedValue("member");
     mocks.getSessionFromReq.mockResolvedValue({ user: { id: "session_user" } });
 
     const response = await app.inject({ method: "POST", url: "/sites/5/goals" });
@@ -117,19 +115,26 @@ describe("auth middleware scope enforcement", () => {
     expect(response.statusCode).toBe(200);
   });
 
-  it("allows Better Auth system admins on site-admin routes without organization-admin access", async () => {
-    mocks.getIsUserAdmin.mockResolvedValue(true);
-    mocks.getSessionFromReq.mockResolvedValue({ user: { id: "system_admin", role: "admin" } });
+  it("admits a session whose role on the site holds the permission, and only that", async () => {
+    mocks.getSessionFromReq.mockResolvedValue({ user: { id: "session_user" } });
 
-    const response = await app.inject({ method: "DELETE", url: "/sites/5" });
+    mocks.getUserSiteRole.mockResolvedValue("admin");
+    expect((await app.inject({ method: "DELETE", url: "/sites/5" })).statusCode).toBe(200);
 
-    expect(response.statusCode).toBe(200);
-    expect(mocks.getUserHasAdminAccessToSite).not.toHaveBeenCalled();
+    mocks.getUserSiteRole.mockResolvedValue("member");
+    const denied = await app.inject({ method: "DELETE", url: "/sites/5" });
+    expect(denied.statusCode).toBe(403);
+    expect(denied.json()).toEqual({ error: "Insufficient role", required: "admin" });
+
+    mocks.getUserSiteRole.mockResolvedValue(null);
+    const outsider = await app.inject({ method: "DELETE", url: "/sites/5" });
+    expect(outsider.statusCode).toBe(403);
+    expect(outsider.json()).toEqual({ error: "Forbidden" });
   });
 
   it("falls through to session access when the bearer scope is insufficient", async () => {
     mocks.checkApiKey.mockResolvedValue(bearerResult({ goals: ["read"] }));
-    mocks.getUserHasAccessToSite.mockResolvedValue(true);
+    mocks.getUserSiteRole.mockResolvedValue("member");
     mocks.getSessionFromReq.mockResolvedValue({ user: { id: "session_user" } });
 
     const response = await app.inject({ method: "POST", url: "/sites/5/goals", headers: bearer });
@@ -137,7 +142,7 @@ describe("auth middleware scope enforcement", () => {
     expect(response.statusCode).toBe(200);
   });
 
-  it("admin guard requires both the admin role and the scope", async () => {
+  it("admin permissions require both the admin role and the scope", async () => {
     mocks.checkApiKey.mockResolvedValue(bearerResult({ sites: ["write"] }, "admin"));
     expect((await app.inject({ method: "DELETE", url: "/sites/5", headers: bearer })).statusCode).toBe(200);
 
@@ -149,7 +154,7 @@ describe("auth middleware scope enforcement", () => {
     mocks.checkApiKey.mockResolvedValue(bearerResult({ sites: ["write"] }, "member"));
     const wrongRole = await app.inject({ method: "DELETE", url: "/sites/5", headers: bearer });
     expect(wrongRole.statusCode).toBe(403);
-    expect(wrongRole.json().error).toBe("Forbidden");
+    expect(wrongRole.json().error).toBe("Insufficient role");
   });
 
   it("deny-scoped routes reject scoped credentials but allow unrestricted ones", async () => {
@@ -162,7 +167,7 @@ describe("auth middleware scope enforcement", () => {
     expect((await app.inject({ method: "POST", url: "/user/settings", headers: bearer })).statusCode).toBe(200);
   });
 
-  it("org member guard enforces org scopes", async () => {
+  it("org guard enforces org scopes", async () => {
     mocks.checkApiKey.mockResolvedValue(bearerResult({ analytics: ["read"] }));
 
     const response = await app.inject({ method: "GET", url: "/organizations/org_1/members", headers: bearer });
@@ -171,19 +176,65 @@ describe("auth middleware scope enforcement", () => {
     expect(response.json()).toEqual({ error: "Insufficient scope", required: "org:read" });
   });
 
-  it("threads the scope requirement into the public-access fallback", async () => {
+  it("org guard reads the session's organization role", async () => {
+    mocks.getSessionFromReq.mockResolvedValue({ user: { id: "session_user" } });
+
+    mocks.getUserOrgRole.mockResolvedValue("member");
+    expect((await app.inject({ method: "GET", url: "/organizations/org_1/members" })).statusCode).toBe(200);
+    const member = await app.inject({ method: "POST", url: "/organizations/org_1/teams" });
+    expect(member.statusCode).toBe(403);
+    expect(member.json()).toEqual({ error: "Insufficient role", required: "admin" });
+
+    mocks.getUserOrgRole.mockResolvedValue("admin");
+    expect((await app.inject({ method: "POST", url: "/organizations/org_1/teams" })).statusCode).toBe(200);
+
+    mocks.getUserOrgRole.mockResolvedValue(null);
+    const outsider = await app.inject({ method: "GET", url: "/organizations/org_1/members" });
+    expect(outsider.statusCode).toBe(403);
+    expect(outsider.json()).toEqual({ error: "You are not a member of this organization" });
+  });
+
+  it("org guard answers 401 when there is no credential at all", async () => {
+    expect((await app.inject({ method: "GET", url: "/organizations/org_1/members" })).statusCode).toBe(401);
+  });
+
+  it("admits anyone on a public site, even a key lacking the scope", async () => {
     mocks.checkApiKey.mockResolvedValue(bearerResult({ goals: ["read"] }));
-    mocks.getUserHasAccessToSitePublic.mockResolvedValue(true);
+    mocks.getSiteIsPubliclyReadable.mockResolvedValue(true);
+
+    // The site is public: the anonymous baseline applies regardless of the key.
+    const response = await app.inject({ method: "GET", url: "/sites/5/overview", headers: bearer });
+
+    expect(response.statusCode).toBe(200);
+  });
+
+  it("keeps the scope error on a private site for a key lacking the scope", async () => {
+    mocks.checkApiKey.mockResolvedValue(bearerResult({ goals: ["read"] }));
 
     const response = await app.inject({ method: "GET", url: "/sites/5/overview", headers: bearer });
 
-    // Public helper said yes (e.g. the site is public) — request passes even
-    // though the key lacks analytics:read; the helper received the requirement.
-    expect(response.statusCode).toBe(200);
-    expect(mocks.getUserHasAccessToSitePublic).toHaveBeenCalledWith(expect.anything(), "5", {
-      resource: "analytics",
-      action: "read",
-    });
+    expect(response.statusCode).toBe(403);
+    expect(response.json()).toEqual({ error: "Insufficient scope", required: "analytics:read" });
+  });
+
+  it("does not consult public access on routes that do not allow it", async () => {
+    mocks.getSiteIsPubliclyReadable.mockResolvedValue(true);
+
+    expect((await app.inject({ method: "GET", url: "/sites/5/goals" })).statusCode).toBe(403);
+    expect(mocks.getSiteIsPubliclyReadable).not.toHaveBeenCalled();
+  });
+
+  it("re-reads the role for anything beyond reading, and uses the cache for reads", async () => {
+    mocks.getSessionFromReq.mockResolvedValue({ user: { id: "session_user" } });
+    mocks.getUserSiteRole.mockResolvedValue("admin");
+
+    await app.inject({ method: "GET", url: "/sites/5/goals" });
+    expect(mocks.getUserSiteRole).toHaveBeenLastCalledWith(expect.anything(), "5", { fresh: false });
+    expect(mocks.checkApiKey).toHaveBeenLastCalledWith(expect.anything(), { siteId: "5", fresh: false });
+
+    await app.inject({ method: "DELETE", url: "/sites/5" });
+    expect(mocks.getUserSiteRole).toHaveBeenLastCalledWith(expect.anything(), "5", { fresh: true });
+    expect(mocks.checkApiKey).toHaveBeenLastCalledWith(expect.anything(), { siteId: "5", fresh: true });
   });
 
   it("keeps returning 429 for rate-limited keys", async () => {
@@ -215,11 +266,14 @@ describe("auth middleware rate limit reporting", () => {
   beforeEach(async () => {
     vi.clearAllMocks();
     mocks.getSessionFromReq.mockResolvedValue(null);
-    mocks.getUserHasAccessToSite.mockResolvedValue(false);
+    mocks.getUserSiteRole.mockResolvedValue(null);
+    mocks.getSiteIsPubliclyReadable.mockResolvedValue(false);
     mocks.getIsUserAdmin.mockResolvedValue(false);
 
     app = Fastify();
-    app.get("/sites/:siteId/goals", { preHandler: [requireSiteAccess()] as any }, async () => ({ ok: true }));
+    app.get("/sites/:siteId/goals", { preHandler: [requireSitePermission("goals:read")] as any }, async () => ({
+      ok: true,
+    }));
     await app.ready();
   });
 
@@ -281,12 +335,65 @@ describe("auth middleware rate limit reporting", () => {
 
   it("sends no rate limit headers for session-authenticated requests", async () => {
     mocks.checkApiKey.mockResolvedValue(invalidResult);
-    mocks.getUserHasAccessToSite.mockResolvedValue(true);
+    mocks.getUserSiteRole.mockResolvedValue("member");
     mocks.getSessionFromReq.mockResolvedValue({ user: { id: "user_1" } });
 
     const response = await app.inject({ method: "GET", url: "/sites/5/goals" });
 
     expect(response.statusCode).toBe(200);
     expect(response.headers["ratelimit-limit"]).toBeUndefined();
+  });
+});
+
+describe("resolveSiteId", () => {
+  let app: FastifyInstance;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    app = Fastify();
+    app.get("/sites/:siteId", { preHandler: [resolveSiteId] as any }, async request => ({
+      siteId: (request.params as { siteId: string }).siteId,
+    }));
+    await app.ready();
+  });
+
+  afterEach(async () => {
+    await app.close();
+  });
+
+  // The access check reads the param with Number(), handlers with parseInt();
+  // any spelling they'd read differently must never reach either.
+  it.each(["1e1", "0x5", "5.0", "+5", "-5", "5a", "%205", "Infinity"])("rejects the non-decimal id %s", async id => {
+    const response = await app.inject({ method: "GET", url: `/sites/${id}` });
+    expect(response.statusCode).toBe(404);
+  });
+
+  it("canonicalizes a decimal id so every reader sees the same number", async () => {
+    expect((await app.inject({ method: "GET", url: "/sites/0042" })).json()).toEqual({ siteId: "42" });
+    expect((await app.inject({ method: "GET", url: "/sites/7" })).json()).toEqual({ siteId: "7" });
+  });
+
+  it("resolves a tracking id to its numeric site id", async () => {
+    const { siteConfig } = await import("./siteConfig.js");
+    vi.mocked(siteConfig.resolveSiteId).mockResolvedValueOnce(123);
+    expect((await app.inject({ method: "GET", url: "/sites/abcdef123456" })).json()).toEqual({ siteId: "123" });
+  });
+
+  it("resolves an all-digit tracking id before treating it as a numeric id", async () => {
+    const { siteConfig } = await import("./siteConfig.js");
+    vi.mocked(siteConfig.resolveSiteId).mockResolvedValueOnce(9);
+    expect((await app.inject({ method: "GET", url: "/sites/123456789012" })).json()).toEqual({ siteId: "9" });
+  });
+
+  it("canonicalizes a long zero-padded id that is not a tracking id", async () => {
+    expect((await app.inject({ method: "GET", url: "/sites/000042" })).json()).toEqual({ siteId: "42" });
+  });
+
+  it("rejects an id beyond the safe integer range", async () => {
+    expect((await app.inject({ method: "GET", url: "/sites/99999999999999999999" })).statusCode).toBe(404);
+  });
+
+  it("rejects an unknown non-numeric tracking id", async () => {
+    expect((await app.inject({ method: "GET", url: "/sites/abcdef123456" })).statusCode).toBe(404);
   });
 });

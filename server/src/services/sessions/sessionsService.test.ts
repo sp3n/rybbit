@@ -2,14 +2,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   sessionGetOrCreate: vi.fn(),
+  eventTimeSession: vi.fn(),
+  eval: vi.fn(),
   quit: vi.fn(),
 }));
 
 vi.mock("../../db/redis/redis.js", () => ({
-  sessionRedis: { quit: mocks.quit },
+  sessionRedis: { quit: mocks.quit, eval: (...args: unknown[]) => mocks.eval(...args) },
   sessionGetOrCreate: (...args: unknown[]) => mocks.sessionGetOrCreate(...args),
+  eventTimeSession: (...args: unknown[]) => mocks.eventTimeSession(...args),
 }));
 
+import { RetryableIngestError } from "../tracker/ingestErrors.js";
 import { SessionsService } from "./sessionsService.js";
 
 const SESSION_TTL_MS = 30 * 60 * 1000;
@@ -21,6 +25,7 @@ describe("SessionsService (Redis-backed)", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
     mocks.sessionGetOrCreate.mockReset();
+    mocks.eval.mockReset();
     mocks.quit.mockReset();
     service = new SessionsService();
   });
@@ -183,5 +188,178 @@ describe("SessionsService (Redis-backed)", () => {
     mocks.quit.mockResolvedValue("OK");
     await service.close();
     expect(mocks.quit).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("SessionsService.resolveReplaySession", () => {
+  let service: SessionsService;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+    mocks.sessionGetOrCreate.mockReset();
+    mocks.eval.mockReset();
+    service = new SessionsService();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const replayBatch = (hasFullSnapshot = false) =>
+    service.resolveReplaySession({ userId: "user-e", siteId: 9, hasFullSnapshot });
+
+  it("resolves through the analytics key without the renewing command", async () => {
+    mocks.eval.mockResolvedValue(["sess-existing", 0]);
+
+    const result = await service.resolveReplaySession({ userId: "user-a", siteId: 42, hasFullSnapshot: true });
+
+    expect(result).toEqual({ sessionId: "sess-existing", needsFullSnapshot: false });
+    expect(mocks.sessionGetOrCreate).not.toHaveBeenCalled();
+    const [script, keyCount, key, replayKey, candidate, ttl, hasFullSnapshot] = mocks.eval.mock.calls[0];
+    // Nothing in the script slides a TTL it didn't just set.
+    expect(script).not.toMatch(/EXPIRE/i);
+    expect(keyCount).toBe(2);
+    expect(key).toBe("session:42:user-a");
+    expect(replayKey).toBe("replay-session:42:user-a");
+    expect(candidate).toHaveLength(14);
+    expect(ttl).toBe(SESSION_TTL_MS);
+    expect(hasFullSnapshot).toBe("1");
+  });
+
+  it("passes on the script's request for a full snapshot", async () => {
+    mocks.eval.mockResolvedValue(["sess-previous", 1]);
+
+    expect(await replayBatch()).toEqual({ sessionId: "sess-previous", needsFullSnapshot: true });
+    expect(mocks.eval.mock.calls[0][6]).toBe("0");
+  });
+
+  it("uses the same identified session key as updateSession", async () => {
+    mocks.sessionGetOrCreate.mockResolvedValue("x");
+    mocks.eval.mockResolvedValue(["x", 0]);
+
+    await service.updateSession({ userId: "fingerprint", identifiedUserId: "employee-alice", siteId: 42 });
+    await service.resolveReplaySession({
+      userId: "fingerprint",
+      identifiedUserId: "employee-alice",
+      siteId: 42,
+      hasFullSnapshot: false,
+    });
+
+    expect(mocks.eval.mock.calls[0][2]).toBe(mocks.sessionGetOrCreate.mock.calls[0][0]);
+  });
+
+  it("keeps a replay in the session Redis resolved when a later lookup fails", async () => {
+    // An existing session: this worker never saw an event for the visitor.
+    mocks.eval.mockResolvedValueOnce(["sess-real", 0]);
+    await replayBatch();
+
+    mocks.eval.mockRejectedValue(new Error("redis blip"));
+    expect(await replayBatch()).toEqual({ sessionId: "sess-real", needsFullSnapshot: false });
+  });
+
+  it("keeps a replay in one session through an outage longer than the analytics window", async () => {
+    mocks.eval.mockRejectedValue(new Error("redis down"));
+    const first = await replayBatch(true);
+
+    for (let minute = 20; minute <= 80; minute += 20) {
+      vi.setSystemTime(new Date(Date.parse("2026-01-01T00:00:00.000Z") + minute * 60_000));
+      expect(await replayBatch()).toEqual({ sessionId: first.sessionId, needsFullSnapshot: false });
+    }
+  });
+
+  it("does not slide the analytics fallback window during an outage", async () => {
+    mocks.sessionGetOrCreate.mockResolvedValueOnce("sess-real");
+    await service.updateSession({ userId: "user-e", siteId: 9 });
+    mocks.sessionGetOrCreate.mockRejectedValue(new Error("redis down"));
+    mocks.eval.mockRejectedValue(new Error("redis down"));
+
+    vi.setSystemTime(new Date(Date.now() + SESSION_TTL_MS - 1000));
+    expect((await replayBatch()).sessionId).toBe("sess-real");
+
+    // Replay didn't extend the analytics session, so the next event starts another.
+    vi.setSystemTime(new Date(Date.now() + 2000));
+    const event = await service.updateSession({ userId: "user-e", siteId: 9 });
+    expect(event.sessionId).not.toBe("sess-real");
+
+    // The replay waits for a full snapshot before following it.
+    expect(await replayBatch()).toEqual({ sessionId: "sess-real", needsFullSnapshot: true });
+    expect(await replayBatch(true)).toEqual({ sessionId: event.sessionId, needsFullSnapshot: false });
+  });
+});
+
+// sp3n/rybbit fork: sessions decided by a trusted caller's event time.
+describe("SessionsService event-time sessions", () => {
+  let service: SessionsService;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-11-07T12:00:00.000Z"));
+    mocks.sessionGetOrCreate.mockReset();
+    mocks.eventTimeSession.mockReset();
+    service = new SessionsService();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("resolves by event time on a key apart from the wall-clock session", async () => {
+    mocks.eventTimeSession.mockResolvedValue("sess-event-time");
+    const eventTimeMs = Date.parse("2026-11-07T08:15:00.000Z");
+
+    const result = await service.updateSession({ userId: "u1", siteId: 42, eventTimeMs });
+
+    expect(result.sessionId).toBe("sess-event-time");
+    expect(mocks.sessionGetOrCreate).not.toHaveBeenCalled();
+    const [key, candidate, eventMs, gapMs, retentionMs, maxSpans] = mocks.eventTimeSession.mock.calls[0];
+    expect(key).toBe("event-time:session:42:u1");
+    expect(candidate).toHaveLength(14);
+    expect(eventMs).toBe(eventTimeMs);
+    expect(gapMs).toBe(SESSION_TTL_MS);
+    expect(retentionMs).toBe(15 * 24 * 60 * 60 * 1000);
+    expect(maxSpans).toBe(16);
+  });
+
+  it("keeps an identified server-side player on one key across sites only per site", async () => {
+    mocks.eventTimeSession.mockResolvedValue("x");
+    const eventTimeMs = Date.parse("2026-11-07T08:15:00.000Z");
+
+    await service.updateSession({
+      userId: "fp",
+      identifiedUserId: "player-7",
+      identifiedUserOnly: true,
+      siteId: 1,
+      eventTimeMs,
+    });
+    await service.updateSession({
+      userId: "fp-other-day",
+      identifiedUserId: "player-7",
+      identifiedUserOnly: true,
+      siteId: 1,
+      eventTimeMs,
+    });
+    await service.updateSession({
+      userId: "fp",
+      identifiedUserId: "player-7",
+      identifiedUserOnly: true,
+      siteId: 2,
+      eventTimeMs,
+    });
+
+    const keys = mocks.eventTimeSession.mock.calls.map(call => call[0]);
+    expect(keys[0]).toBe(keys[1]); // a new salt day's fingerprint does not split the player
+    expect(keys[2]).not.toBe(keys[0]); // demo and retail sites stay apart
+    expect(keys[0]).toMatch(/^event-time:session:1:identified-server:/);
+  });
+
+  it("asks the caller to retry when Redis fails, instead of grouping by arrival", async () => {
+    mocks.eventTimeSession.mockRejectedValue(new Error("redis down"));
+    const eventTimeMs = Date.parse("2026-11-07T08:15:00.000Z");
+
+    await expect(service.updateSession({ userId: "u1", siteId: 42, eventTimeMs })).rejects.toBeInstanceOf(
+      RetryableIngestError
+    );
+    expect(mocks.sessionGetOrCreate).not.toHaveBeenCalled();
   });
 });

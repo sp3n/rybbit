@@ -13,6 +13,7 @@ import {
   buildTrackingScriptSnippet,
   formatTrackingScriptAttribute,
   getTrackingScriptDataAttributes,
+  getTrackingScriptUrl,
 } from "@/lib/trackingScriptSnippet";
 
 import { SettingsSection, SettingsSections } from "./SettingsSection";
@@ -91,7 +92,11 @@ export function ScriptBuilder({ siteMetadata }: ScriptBuilderProps) {
 
   // Build the data attributes shared by every snippet variation, so the HTML,
   // JavaScript injection, and AI agent versions all reflect the configured options.
-  const scriptUrl = `${globalThis.location.origin}/api/script.js`;
+  // The site ID travels in the script URL rather than a data attribute so that
+  // script optimizers which rebuild the tag (WP Rocket, Perfmatters, ...) can't
+  // strip it. The rest of the site's tracking config is embedded as data
+  // attributes so the script needs no config request.
+  const scriptUrl = getTrackingScriptUrl(siteMetadata);
   const snippetOptions = { debounceValue, skipPatterns, maskPatterns };
   const dataAttributes = getTrackingScriptDataAttributes(siteMetadata, snippetOptions);
 
@@ -103,12 +108,11 @@ export function ScriptBuilder({ siteMetadata }: ScriptBuilderProps) {
     var el = document.createElement("script");
     el.src = "${scriptUrl}";
     el.defer = true;
-${dataAttributes.map(([key, value]) => `    el.setAttribute("${key}", ${JSON.stringify(value)});`).join("\n")}
-    document.head.appendChild(el);
+${dataAttributes.map(([key, value]) => `    el.setAttribute("${key}", ${JSON.stringify(value)});\n`).join("")}    document.head.appendChild(el);
   })();
 </script>`;
 
-  const inlineScript = `<script src="${scriptUrl}" ${dataAttributes.map(formatTrackingScriptAttribute).join(" ")} defer></script>`;
+  const inlineScript = `<script src="${scriptUrl}" ${dataAttributes.map(attr => `${formatTrackingScriptAttribute(attr)} `).join("")}defer></script>`;
 
   const aiPrompt = `Install Rybbit analytics on this website.
 

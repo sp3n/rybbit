@@ -6,6 +6,7 @@ export type TrackingScriptSiteConfig = {
   trackErrors?: boolean;
   trackOutbound?: boolean;
   trackUrlParams?: boolean;
+  trackUrlFragments?: boolean;
   trackInitialPageView?: boolean;
   trackSpaNavigation?: boolean;
   trackButtonClicks?: boolean;
@@ -41,19 +42,29 @@ export function formatTrackingScriptAttribute([key, value]: TrackingScriptAttrib
   return value.includes('"') ? `${key}='${value}'` : `${key}="${value}"`;
 }
 
+// The site ID travels in the script URL rather than a data attribute so that
+// script optimizers which rebuild the tag (WP Rocket, Perfmatters, ...) can't
+// strip it. Remaining options stay as data attributes.
+export function getTrackingScriptUrl(siteConfig: TrackingScriptSiteConfig) {
+  const siteId = siteConfig.id ?? siteConfig.siteId;
+  return `${globalThis.location.origin}/api/script.js?siteId=${encodeURIComponent(String(siteId))}`;
+}
+
 export function getTrackingScriptDataAttributes(
   siteConfig: TrackingScriptSiteConfig,
   { debounceValue = 500, skipPatterns = [], maskPatterns = [] }: TrackingScriptOptions = {}
 ): TrackingScriptAttribute[] {
-  const siteId = siteConfig.id ?? siteConfig.siteId;
   const attributes: TrackingScriptAttribute[] = [
-    ["data-site-id", String(siteId)],
     ...booleanAttributes.map(
       ([key, attributeName, defaultValue]) =>
         [attributeName, String(siteConfig[key] ?? defaultValue)] as TrackingScriptAttribute
     ),
   ];
 
+  // Off by default, so the attribute is only written when it changes something.
+  if (siteConfig.trackUrlFragments) {
+    attributes.push(["data-track-url-fragments", "true"]);
+  }
   if (debounceValue !== 500) {
     attributes.push(["data-debounce", String(debounceValue)]);
   }
@@ -78,7 +89,7 @@ export function buildTrackingScriptSnippet(
   });
 
   return `<script
-    src="${globalThis.location.origin}/api/script.js"
+    src="${getTrackingScriptUrl(siteConfig)}"
 ${dataAttributes.map(attribute => `    ${formatTrackingScriptAttribute(attribute)}`).join("\n")}
     defer
 ></script>`;

@@ -1,10 +1,36 @@
+import { claimExpiryIso } from "../../services/sites/claimExpiry.js";
 import { eq } from "drizzle-orm";
 import { FastifyReply, FastifyRequest } from "fastify";
 import { db } from "../../db/postgres/postgres.js";
-import { sites } from "../../db/postgres/schema.js";
-import { getUserHasAdminAccessToSite } from "../../lib/auth-utils.js";
+import { organization, sites } from "../../db/postgres/schema.js";
+import { isAdminRole, permissionsForRole } from "@rybbit/shared";
+import { getUserSiteRole } from "../../lib/auth-utils.js";
+import { getBestSubscription, siteRequiresPlan } from "../../lib/subscriptionUtils.js";
 import { hasFeatureFlagsForRuntime } from "../../services/featureFlags/definitions.js";
 import { usageService } from "../../services/usageService.js";
+
+/**
+ * Whether the site is switched off until its organization starts a plan. Sites from before
+ * the free plan ended never need one, so only newer sites pay for the subscription lookup.
+ */
+async function getSiteRequiresPlan(site: { organizationId: string | null; createdAt: string | null }) {
+  if (!site.organizationId || !siteRequiresPlan({ status: "free" }, site.createdAt)) {
+    return false;
+  }
+  const [org] = await db
+    .select({
+      stripeCustomerId: organization.stripeCustomerId,
+      customPlan: organization.customPlan,
+      planOverride: organization.planOverride,
+    })
+    .from(organization)
+    .where(eq(organization.id, site.organizationId))
+    .limit(1);
+  const subscription = await getBestSubscription(site.organizationId, org?.stripeCustomerId ?? null, {
+    orgPlan: org ?? null,
+  });
+  return siteRequiresPlan(subscription, site.createdAt);
+}
 
 interface GetSiteParams {
   Params: {
@@ -25,8 +51,9 @@ export async function getSite(request: FastifyRequest<GetSiteParams>, reply: Fas
       return reply.status(404).send({ error: "Site not found" });
     }
 
-    // Check if user has admin access
-    const isOwner = await getUserHasAdminAccessToSite(request, site.siteId);
+    // The caller's role on the site; null for public and private-link viewers.
+    const [role, requiresPlan] = await Promise.all([getUserSiteRole(request, site.siteId), getSiteRequiresPlan(site)]);
+    // sp3n/rybbit fork: replay and web vitals are web-only; game and mobile sites never report them.
     const sessionReplay =
       site.type && site.type !== "web" ? false : site.sessionReplay && !usageService.isSiteWithoutReplay(site.siteId);
     const featureFlagsEnabled = await hasFeatureFlagsForRuntime(site.siteId, "client");
@@ -41,19 +68,25 @@ export async function getSite(request: FastifyRequest<GetSiteParams>, reply: Fas
       updatedAt: site.updatedAt,
       createdBy: site.createdBy,
       organizationId: site.organizationId,
+      claimExpiresAt: claimExpiryIso(site.claimExpiresAt),
       saltUserIds: site.saltUserIds,
       public: site.public,
       embedEnabled: site.embedEnabled,
       blockBots: site.blockBots,
       firstPartyProxy: site.firstPartyProxy,
       trackIp: site.trackIp,
-      isOwner: isOwner,
+      isOwner: isAdminRole(role),
+      role,
+      // What that role allows here (a bearer credential's scopes may narrow it).
+      permissions: permissionsForRole(role),
+      requiresPlan,
       // Analytics features
       sessionReplay,
       webVitals: site.type && site.type !== "web" ? false : site.webVitals,
       trackErrors: site.trackErrors,
       trackOutbound: site.trackOutbound,
       trackUrlParams: site.trackUrlParams,
+      trackUrlFragments: site.trackUrlFragments,
       trackInitialPageView: site.trackInitialPageView,
       trackSpaNavigation: site.trackSpaNavigation,
       trackButtonClicks: site.trackButtonClicks,

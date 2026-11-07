@@ -106,6 +106,49 @@ describe("parseScriptConfig", () => {
     expect(config?.enableSessionReplay).toBe(false);
   });
 
+  it("evaluates feature flags using opted-in checkout fragments", async () => {
+    const originalLocation = Object.getOwnPropertyDescriptor(window, "location");
+    Object.defineProperty(window, "location", {
+      configurable: true,
+      value: { href: "https://example.com/checkout/#shipping" },
+    });
+    try {
+      mockScriptTag.setAttribute("src", "https://analytics.example.com/script.js");
+      mockScriptTag.setAttribute("data-site-id", "123");
+      // sp3n/rybbit fork: the site's settings arrive as data attributes, not a config request.
+      mockScriptTag.setAttribute("data-feature-flags-enabled", "true");
+      mockScriptTag.setAttribute("data-track-url-fragments", "true");
+      vi.mocked(fetch).mockResolvedValueOnce({ ok: true, json: async () => ({ flags: {} }) } as Response);
+
+      await parseScriptConfig(mockScriptTag);
+
+      const body = JSON.parse(vi.mocked(fetch).mock.calls[0][1]!.body as string);
+      expect(body.pathname).toBe("/checkout/#shipping");
+    } finally {
+      if (originalLocation) Object.defineProperty(window, "location", originalLocation);
+    }
+  });
+
+  it("reuses a stored visitor id, but replaces one longer than the server accepts", async () => {
+    mockScriptTag.setAttribute("src", "https://analytics.example.com/script.js");
+    mockScriptTag.setAttribute("data-site-id", "123");
+    // sp3n/rybbit fork: flags are enabled by data attribute, so only the evaluation is fetched.
+    mockScriptTag.setAttribute("data-feature-flags-enabled", "true");
+    const mockFlagsEnabled = () =>
+      vi.mocked(fetch).mockResolvedValueOnce({ ok: true, json: async () => ({ flags: {} }) } as Response);
+
+    localStorage.setItem("rybbit-visitor-id", "stored-visitor");
+    mockFlagsEnabled();
+    expect((await parseScriptConfig(mockScriptTag))?.visitorId).toBe("stored-visitor");
+
+    localStorage.setItem("rybbit-visitor-id", "x".repeat(65));
+    mockFlagsEnabled();
+    const { visitorId } = (await parseScriptConfig(mockScriptTag))!;
+    expect(visitorId).not.toBe("x".repeat(65));
+    expect(visitorId!.length).toBeLessThanOrEqual(64);
+    expect(localStorage.getItem("rybbit-visitor-id")).toBe(visitorId);
+  });
+
   it("stops future evaluation when flags are deleted between configuration and evaluation", async () => {
     mockScriptTag.setAttribute("src", "https://analytics.example.com/script.js");
     mockScriptTag.setAttribute("data-site-id", "123");
@@ -138,6 +181,7 @@ describe("parseScriptConfig", () => {
       autoTrackPageview: true,
       autoTrackSpa: true,
       trackQuerystring: true,
+      trackUrlFragments: false,
       trackOutbound: true,
       enableWebVitals: false,
       trackErrors: false,
@@ -168,7 +212,9 @@ describe("parseScriptConfig", () => {
     mockScriptTag.setAttribute("src", "https://analytics.example.com/script.js");
     const config = await parseScriptConfig(mockScriptTag);
     expect(config).toBeNull();
-    expect(consoleSpy).toHaveBeenCalledWith("Please provide a valid site ID using the data-site-id attribute");
+    expect(consoleSpy).toHaveBeenCalledWith(
+      "Please provide a valid site ID using the ?siteId= query parameter or the data-site-id attribute"
+    );
   });
 
   it("should parse non-numeric site ID", async () => {
@@ -293,6 +339,45 @@ describe("parseScriptConfig", () => {
 
     const config = await parseScriptConfig(mockScriptTag);
     expect(config?.skipPatterns).toEqual([]);
+  });
+
+  it("should read the site ID from the script URL", async () => {
+    mockScriptTag.setAttribute("src", "https://analytics.example.com/script.js?siteId=789");
+
+    (global.fetch as any).mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({}),
+    });
+
+    const config = await parseScriptConfig(mockScriptTag);
+    expect(config?.siteId).toBe("789");
+    expect(config?.analyticsHost).toBe("https://analytics.example.com");
+  });
+
+  it("should prefer the URL site ID over the data attribute", async () => {
+    mockScriptTag.setAttribute("src", "https://analytics.example.com/script.js?siteId=from-url");
+    mockScriptTag.setAttribute("data-site-id", "from-attr");
+
+    (global.fetch as any).mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({}),
+    });
+
+    const config = await parseScriptConfig(mockScriptTag);
+    expect(config?.siteId).toBe("from-url");
+  });
+
+  it("should read the site ID from a relative proxied script URL", async () => {
+    mockScriptTag.setAttribute("src", "/analytics/script.js?siteId=proxied");
+
+    (global.fetch as any).mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({}),
+    });
+
+    const config = await parseScriptConfig(mockScriptTag);
+    expect(config?.siteId).toBe("proxied");
+    expect(config?.analyticsHost).toBe("/analytics");
   });
 
   it("should support legacy site-id attribute", async () => {

@@ -1,11 +1,14 @@
 "use client";
 
 import * as React from "react";
+import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { Command as CommandPrimitive } from "cmdk";
+import { AnimatePresence, motion } from "framer-motion";
 import { SearchIcon } from "lucide-react";
 
 import { cn } from "@/lib/utils";
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { FADE_IN, FADE_OUT, SPRING_PANEL } from "@/lib/motion";
+import { Dialog, DialogPortal } from "@/components/ui/dialog";
 
 const Command = React.forwardRef<
   React.ElementRef<typeof CommandPrimitive>,
@@ -15,7 +18,7 @@ const Command = React.forwardRef<
     ref={ref}
     data-slot="command"
     className={cn(
-      "flex h-full w-full flex-col overflow-hidden rounded-md bg-white text-neutral-950 dark:bg-neutral-900 dark:text-neutral-50",
+      "flex h-full w-full flex-col overflow-hidden rounded-md bg-transparent text-neutral-950 dark:text-neutral-50",
       className
     )}
     {...props}
@@ -23,41 +26,82 @@ const Command = React.forwardRef<
 ));
 Command.displayName = CommandPrimitive.displayName;
 
-const CommandDialog = ({
-  title = "Command Palette",
-  description = "Search for a command to run...",
-  children,
-  className,
-  showCloseButton = true,
-  ...props
-}: React.ComponentProps<typeof Dialog> & {
-  title?: string;
-  description?: string;
+type CommandDialogProps = {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  /** Names the dialog for screen readers; not shown. */
+  title: string;
+  description: string;
   className?: string;
-  showCloseButton?: boolean;
-}) => {
-  return (
-    <Dialog {...props}>
-      <DialogHeader className="sr-only">
-        <DialogTitle>{title}</DialogTitle>
-        <DialogDescription>{description}</DialogDescription>
-      </DialogHeader>
-      <DialogContent className={cn("overflow-hidden p-0", className)}>
-        <Command className="[&_[cmdk-group-heading]]:text-muted-foreground [&_[data-slot=command-input-wrapper]]:h-12 [&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:font-medium [&_[cmdk-group]]:px-2 [&_[cmdk-group]:not([hidden])_~[cmdk-group]]:pt-0 [&_[cmdk-input-wrapper]_svg]:h-5 [&_[cmdk-input-wrapper]_svg]:w-5 [&_[cmdk-input]]:h-12 [&_[cmdk-item]]:px-2 [&_[cmdk-item]]:py-3 [&_[cmdk-item]_svg]:h-5 [&_[cmdk-item]_svg]:w-5">
-          {children}
-        </Command>
-      </DialogContent>
-    </Dialog>
-  );
-};
+  /** The menu itself, usually a <Command>. */
+  children: React.ReactNode;
+} & Pick<
+  React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content>,
+  "onCloseAutoFocus" | "onEscapeKeyDown" | "onKeyDown"
+>;
+
+/**
+ * A command menu in a Radix Dialog, which supplies the dialog role, focus trap,
+ * scroll lock and Escape. The panel sits near the top of the viewport so the
+ * input stays put while results change, and floats in on the shared panel
+ * spring. Controlled only: the exit animation needs to know when `open` drops.
+ */
+const CommandDialog = ({
+  open,
+  onOpenChange,
+  title,
+  description,
+  className,
+  children,
+  ...contentProps
+}: CommandDialogProps) => (
+  <Dialog open={open} onOpenChange={onOpenChange}>
+    <AnimatePresence>
+      {open && (
+        <DialogPortal key="command-dialog" forceMount>
+          <DialogPrimitive.Overlay asChild forceMount>
+            <motion.div
+              className="fixed inset-0 z-50 bg-black/25 dark:bg-black/60"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1, transition: FADE_IN }}
+              exit={{ opacity: 0, transition: FADE_OUT }}
+            />
+          </DialogPrimitive.Overlay>
+          <DialogPrimitive.Content asChild forceMount {...contentProps}>
+            <motion.div
+              className={cn(
+                "fixed inset-x-0 top-[12vh] z-50 mx-auto flex w-[calc(100%-2rem)] max-w-xl flex-col overflow-hidden rounded-lg border border-neutral-150 bg-white text-neutral-950 shadow-[0_12px_32px_-8px_rgba(0,0,0,0.18),0_1px_2px_rgba(0,0,0,0.06)] outline-none dark:border-neutral-750 dark:bg-neutral-800 dark:text-neutral-50 dark:shadow-[0_12px_32px_-8px_rgba(0,0,0,0.65),0_1px_2px_rgba(0,0,0,0.4)]",
+                className
+              )}
+              initial={{ opacity: 0, scale: 0.96, y: 12 }}
+              animate={{ opacity: 1, scale: 1, y: 0, transition: { ...SPRING_PANEL, opacity: FADE_IN } }}
+              exit={{ opacity: 0, scale: 0.98, y: 6, transition: FADE_OUT }}
+            >
+              <DialogPrimitive.Title className="sr-only">{title}</DialogPrimitive.Title>
+              <DialogPrimitive.Description className="sr-only">{description}</DialogPrimitive.Description>
+              {children}
+            </motion.div>
+          </DialogPrimitive.Content>
+        </DialogPortal>
+      )}
+    </AnimatePresence>
+  </Dialog>
+);
 
 const CommandInput = React.forwardRef<
   React.ElementRef<typeof CommandPrimitive.Input>,
-  React.ComponentPropsWithoutRef<typeof CommandPrimitive.Input>
->(({ className, ...props }, ref) => (
+  React.ComponentPropsWithoutRef<typeof CommandPrimitive.Input> & {
+    wrapperClassName?: string;
+    /** Rendered after the input, e.g. a key hint. */
+    children?: React.ReactNode;
+  }
+>(({ className, wrapperClassName, children, ...props }, ref) => (
   <div
     data-slot="command-input-wrapper"
-    className="flex h-9 items-center gap-2 border-b border-neutral-200 px-3 dark:border-neutral-800"
+    className={cn(
+      "flex h-9 items-center gap-2 border-b border-neutral-200 px-3 dark:border-neutral-700",
+      wrapperClassName
+    )}
   >
     <SearchIcon className="h-4 w-4 shrink-0 opacity-50" />
     <CommandPrimitive.Input
@@ -69,6 +113,7 @@ const CommandInput = React.forwardRef<
       )}
       {...props}
     />
+    {children}
   </div>
 ));
 
@@ -126,7 +171,7 @@ const CommandSeparator = React.forwardRef<
   <CommandPrimitive.Separator
     ref={ref}
     data-slot="command-separator"
-    className={cn("-mx-1 my-1 h-px bg-neutral-100 dark:bg-neutral-800", className)}
+    className={cn("-mx-1 my-1 h-px bg-neutral-100 dark:bg-neutral-700", className)}
     {...props}
   />
 ));
@@ -140,7 +185,7 @@ const CommandItem = React.forwardRef<
     ref={ref}
     data-slot="command-item"
     className={cn(
-      "relative flex cursor-default select-none items-center rounded-sm px-2 py-1.5 text-sm outline-none data-[disabled=true]:pointer-events-none data-[selected=true]:bg-neutral-100 data-[selected=true]:text-neutral-900 data-[disabled=true]:opacity-50 dark:data-[selected=true]:bg-neutral-800 dark:data-[selected=true]:text-neutral-50",
+      "relative flex cursor-default select-none items-center rounded-sm px-2 py-1.5 text-sm outline-none data-[disabled=true]:pointer-events-none data-[selected=true]:bg-neutral-100 data-[selected=true]:text-neutral-900 data-[disabled=true]:opacity-50 dark:data-[selected=true]:bg-neutral-750 dark:data-[selected=true]:text-neutral-50",
       className
     )}
     {...props}

@@ -1,11 +1,15 @@
 // Site Management
 export { addSite } from "./addSite.js";
+export { claimSite } from "./claimSite.js";
+export { createUnclaimedSite } from "./createUnclaimedSite.js";
 export { deleteSite } from "./deleteSite.js";
 export { getSite } from "./getSite.js";
 export { getSiteHasData } from "./getSiteHasData.js";
+export { checkInstall } from "./checkInstall.js";
 export { getSiteIsPublic } from "./getSiteIsPublic.js";
 export { getSiteUsage } from "./getSiteUsage.js";
 export { getEmbedStats } from "./getEmbedStats.js";
+export { getFavicon } from "./getFavicon.js";
 export { getSitesFromOrg } from "./getSitesFromOrg.js";
 export { moveSite } from "./moveSite.js";
 export { updateSiteConfig } from "./updateSiteConfig.js";

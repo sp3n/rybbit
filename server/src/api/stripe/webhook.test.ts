@@ -22,6 +22,7 @@ const mocks = vi.hoisted(() => {
     previousWebhookSecret,
     constructEvent: vi.fn(),
     invalidateStripeSubscriptionCache: vi.fn(),
+    requestOrganizationRefresh: vi.fn(),
     select,
     selectWhere,
     selectLimit,
@@ -41,6 +42,10 @@ vi.mock("../../db/postgres/postgres.js", () => ({
 
 vi.mock("../../lib/subscriptionUtils.js", () => ({
   invalidateStripeSubscriptionCache: mocks.invalidateStripeSubscriptionCache,
+}));
+
+vi.mock("../../services/usageService.js", () => ({
+  usageService: { requestOrganizationRefresh: mocks.requestOrganizationRefresh },
 }));
 
 import { handleWebhook } from "./webhook.js";
@@ -66,7 +71,8 @@ function createRequest(overrides: RequestOverrides = {}) {
   return {
     headers: overrides.headers ?? { "stripe-signature": SIGNATURE },
     body: overrides.parsedBody,
-    raw: rawBody === null ? {} : { body: rawBody },
+    // The webhook route's parser (keepRawJsonBody) puts the exact bytes here.
+    rawBody: rawBody === null ? undefined : Buffer.isBuffer(rawBody) ? rawBody : Buffer.from(rawBody ?? ""),
     log: requestLogger,
   } as any;
 }
@@ -121,7 +127,7 @@ describe("handleWebhook — signature verification", () => {
     const reply = createReply();
     await handleWebhook(createRequest({ headers: {} }), reply);
 
-    expect(mocks.constructEvent).toHaveBeenCalledWith('{"id":"evt_raw"}', undefined, "whsec_test_secret");
+    expect(mocks.constructEvent).toHaveBeenCalledWith(Buffer.from('{"id":"evt_raw"}'), undefined, "whsec_test_secret");
     expect(reply.statusCode).toBe(400);
     expect(reply.payload).toContain("Webhook Error");
     expectNoDbWrites();
@@ -168,9 +174,10 @@ describe("handleWebhook — signature verification", () => {
     await handleWebhook(createRequest({ rawBody, parsedBody: { id: "evt_1", type: "tampered.event" } }), reply);
 
     expect(mocks.constructEvent).toHaveBeenCalledTimes(1);
-    expect(mocks.constructEvent).toHaveBeenCalledWith(rawBody, SIGNATURE, "whsec_test_secret");
+    expect(mocks.constructEvent).toHaveBeenCalledWith(Buffer.from(rawBody), SIGNATURE, "whsec_test_secret");
     const [firstArg] = mocks.constructEvent.mock.calls[0];
-    expect(typeof firstArg).toBe("string");
+    expect(Buffer.isBuffer(firstArg)).toBe(true);
+    expect(firstArg.toString("utf8")).toBe(rawBody);
     expect(firstArg).not.toEqual({ id: "evt_1", type: "tampered.event" });
   });
 
@@ -210,6 +217,9 @@ describe("handleWebhook — checkout.session.completed", () => {
     const updateWhere = dialect.sqlToQuery(mocks.updateWhere.mock.calls[0][0] as SQL);
     expect(updateWhere.params).toEqual(["org_1"]);
 
+    // And turned the org's sites on without waiting for the usage cron.
+    expect(mocks.requestOrganizationRefresh).toHaveBeenCalledWith("org_1");
+
     expect(reply.statusCode).toBe(200);
     expect(reply.payload).toEqual({ received: true });
   });
@@ -230,6 +240,7 @@ describe("handleWebhook — checkout.session.completed", () => {
 
     expect(mocks.select).toHaveBeenCalledTimes(1);
     expect(mocks.update).not.toHaveBeenCalled();
+    expect(mocks.requestOrganizationRefresh).toHaveBeenCalledWith("org_existing");
     expect(reply.payload).toEqual({ received: true });
   });
 
@@ -318,8 +329,9 @@ describe("handleWebhook — checkout.session.completed", () => {
 
 describe("handleWebhook — subscription lifecycle events", () => {
   it.each(["customer.subscription.updated", "customer.subscription.deleted"])(
-    "invalidates the subscription cache for the event's customer on %s",
+    "invalidates the subscription cache and refreshes the customer's org on %s",
     async eventType => {
+      mocks.selectLimit.mockResolvedValue([{ id: "org_lifecycle" }]);
       mocks.constructEvent.mockReturnValue(stripeEvent(eventType, { id: "sub_1", customer: "cus_lifecycle" }));
 
       const reply = createReply();
@@ -327,10 +339,27 @@ describe("handleWebhook — subscription lifecycle events", () => {
 
       expect(mocks.invalidateStripeSubscriptionCache).toHaveBeenCalledTimes(1);
       expect(mocks.invalidateStripeSubscriptionCache).toHaveBeenCalledWith("cus_lifecycle");
-      expectNoDbWrites();
+      const lookupWhere = dialect.sqlToQuery(mocks.selectWhere.mock.calls[0][0] as SQL);
+      expect(lookupWhere.params).toEqual(["cus_lifecycle"]);
+      expect(mocks.requestOrganizationRefresh).toHaveBeenCalledWith("org_lifecycle");
+      expect(mocks.update).not.toHaveBeenCalled();
       expect(reply.payload).toEqual({ received: true });
     }
   );
+
+  it("still acknowledges a lifecycle event when the org lookup fails", async () => {
+    mocks.selectLimit.mockRejectedValue(new Error("db down"));
+    mocks.constructEvent.mockReturnValue(
+      stripeEvent("customer.subscription.deleted", { id: "sub_2", customer: "cus_lifecycle" })
+    );
+
+    const reply = createReply();
+    await handleWebhook(createRequest(), reply);
+
+    expect(mocks.requestOrganizationRefresh).not.toHaveBeenCalled();
+    expect(reply.statusCode).toBe(200);
+    expect(reply.payload).toEqual({ received: true });
+  });
 });
 
 describe("handleWebhook — unhandled event types", () => {

@@ -37,7 +37,7 @@ export function InteriorPageHero({
     primaryAction === undefined
       ? {
           href: "https://app.rybbit.io/signup",
-          label: t("Start for $0"),
+          label: t("Start free trial for $0"),
           eventName: "signup",
         }
       : primaryAction;
@@ -59,11 +59,7 @@ export function InteriorPageHero({
           <HeroDataLine id="interior" className="hidden h-28 sm:block lg:h-36" />
           <div className="relative">
             {breadcrumbs && <div className="mb-6">{breadcrumbs}</div>}
-            {eyebrow && (
-              <p className="mb-6 text-sm font-semibold text-emerald-600 dark:text-emerald-400">
-                {eyebrow}
-              </p>
-            )}
+            {eyebrow && <p className="mb-6 text-sm font-semibold text-emerald-600 dark:text-emerald-400">{eyebrow}</p>}
             <h1 className="max-w-3xl text-[clamp(3rem,5.25vw,4.75rem)] font-semibold leading-[0.96] tracking-[-0.04em] text-neutral-950 text-balance dark:text-neutral-50">
               {title}
             </h1>
@@ -106,9 +102,7 @@ export function InteriorPageHero({
             </div>
           )}
 
-          {resolvedNote && (
-            <p className="mt-4 text-sm text-neutral-500 dark:text-neutral-400">{resolvedNote}</p>
-          )}
+          {resolvedNote && <p className="mt-4 text-sm text-neutral-500 dark:text-neutral-400">{resolvedNote}</p>}
         </div>
       </div>
     </section>

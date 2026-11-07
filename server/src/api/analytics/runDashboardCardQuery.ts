@@ -1,13 +1,17 @@
 import { FastifyReply, FastifyRequest } from "fastify";
 import SqlString from "sqlstring";
 import { z } from "zod";
-import { clickhouse } from "../../db/clickhouse/clickhouse.js";
-import { MAX_CUSTOM_QUERY_LENGTH, normalizeCustomQuery, validateScopedQuery } from "./utils/customQueryValidation.js";
+import { clickhouseQuery } from "../../db/clickhouse/clickhouse.js";
+import { QUERY_USER_LIMITS } from "../../db/clickhouse/queryLimits.js";
+import { isQueryUserIsolated, QUERY_USER_UNAVAILABLE_ERROR, siteScopeHeaders } from "../../db/clickhouse/queryUser.js";
+import {
+  MAX_CUSTOM_QUERY_LENGTH,
+  normalizeCustomQuery,
+  sanitizeClickhouseError,
+  validateScopedQuery,
+} from "./utils/customQueryValidation.js";
 import { validateHttpTimeParams } from "./utils/query-validation.js";
 import { bucketIntervalMap, getTimeStatement } from "./utils/timeWindow.js";
-
-const MAX_EXECUTION_TIME_SECONDS = 10;
-const MAX_RESULT_ROWS = 1000;
 
 const BUCKET_TOKEN = /\{\{\s*bucket\s*\}\}/gi;
 const TZ_TOKEN = /\{\{\s*tz\s*\}\}/gi;
@@ -75,13 +79,15 @@ export async function runDashboardCardQuery(
   // so day buckets align to local calendar days, matching the standard charts.
   const bucketInterval = bucketIntervalMap[body.data.bucket ?? "hour"];
   const timeZoneLiteral = SqlString.escape(body.data.timeZone || "UTC");
-  const substitutedQuery = body.data.query
-    .replace(BUCKET_TOKEN, bucketInterval)
-    .replace(TZ_TOKEN, timeZoneLiteral);
+  const substitutedQuery = body.data.query.replace(BUCKET_TOKEN, bucketInterval).replace(TZ_TOKEN, timeZoneLiteral);
 
   const validationError = validateScopedQuery(substitutedQuery);
   if (validationError) {
     return reply.status(400).send({ error: validationError });
+  }
+
+  if (!(await isQueryUserIsolated())) {
+    return reply.status(503).send({ error: QUERY_USER_UNAVAILABLE_ERROR });
   }
 
   // Auto-scope the timestamp to the global time range. getTimeStatement returns
@@ -104,19 +110,19 @@ export async function runDashboardCardQuery(
   `;
 
   try {
-    const result = await clickhouse.query({
+    const result = await clickhouseQuery.query({
       query,
       format: "JSONEachRow",
       query_params: {
         siteIds: [siteId],
-        limit: MAX_RESULT_ROWS,
+        limit: QUERY_USER_LIMITS.maxResultRows,
       },
-      clickhouse_settings: {
-        max_execution_time: MAX_EXECUTION_TIME_SECONDS,
-        max_result_rows: String(MAX_RESULT_ROWS),
-        result_overflow_mode: "break",
-        readonly: "2",
-      },
+      // The rybbit_query row policy only admits rows from these sites, so the
+      // scoped_events CTE isn't the only thing keeping the query in tenant.
+      http_headers: siteScopeHeaders([siteId]),
+      // Execution limits (readonly, max_execution_time, max_memory_usage,
+      // max_result_rows, …) come from the rybbit_query settings profile and are
+      // pinned there with constraints; sending them here would be rejected.
     });
 
     const data = await result.json<Record<string, unknown>>();
@@ -125,13 +131,12 @@ export async function runDashboardCardQuery(
       meta: {
         queryId: result.query_id,
         rowCount: data.length,
-        maxExecutionTimeSeconds: MAX_EXECUTION_TIME_SECONDS,
-        maxRows: MAX_RESULT_ROWS,
+        maxExecutionTimeSeconds: QUERY_USER_LIMITS.maxExecutionTimeSeconds,
+        maxRows: QUERY_USER_LIMITS.maxResultRows,
       },
     });
   } catch (error) {
     request.log.error(error, "Failed to run dashboard card query");
-    const message = error instanceof Error && error.message ? error.message : "Failed to run query";
-    return reply.status(400).send({ error: message });
+    return reply.status(400).send({ error: sanitizeClickhouseError(error) });
   }
 }

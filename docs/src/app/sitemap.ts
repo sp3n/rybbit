@@ -1,6 +1,8 @@
 import { MetadataRoute } from "next";
 import { source } from "@/lib/source";
 import { blogSource } from "@/lib/blog-source";
+import { comparedCompetitors } from "@/app/[locale]/(home)/compare/data/competitors";
+import { vsPairs } from "@/app/[locale]/(home)/compare/data/vsPairs";
 import { socialMediaToolSlugs } from "@/app/[locale]/(home)/tools/(social-media-tools)/components/social-tool-slugs";
 import { routing } from "@/i18n/routing";
 import { readdirSync } from "fs";
@@ -10,8 +12,8 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
   const baseUrl = "https://rybbit.com";
 
   // hreflang alternates for routes whose content is actually localized
-  // (rendered through translated templates). Docs/blog content is en-only and
-  // non-en /tools pages are noindexed, so those routes get no alternates.
+  // (rendered through translated templates). Docs/blog content is en-only, and
+  // non-en /tools and /compare pages are noindexed, so those routes get no alternates.
   const localeUrl = (locale: string, path: string) =>
     locale === routing.defaultLocale ? `${baseUrl}${path}` : `${baseUrl}/${locale}${path}`;
   const localeAlternates = (path: string) => ({
@@ -37,7 +39,7 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
   // Get all blog posts
   const blogPosts = blogSource.getPages().map(post => ({
     url: `${baseUrl}/blog/${post.slugs.join("/")}`,
-    lastModified: post.data.date || new Date(),
+    lastModified: post.data.updated || post.data.date || new Date(),
     changeFrequency: "monthly" as const,
     priority: 0.7,
   }));
@@ -79,31 +81,25 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
     })),
   ];
 
-  // Comparison pages
-  const competitors = [
-    "google-analytics",
-    "plausible",
-    "posthog",
-    "umami",
-    "fathom",
-    "simpleanalytics",
-    "matomo",
-    "cloudflare-analytics",
-  ];
+  // Comparison pages: Rybbit-vs-X pages and "X vs Y" pairs, both from the compare registry
   const comparisonPages = [
     {
       url: `${baseUrl}/compare`,
       lastModified: new Date(),
       changeFrequency: "monthly" as const,
       priority: 0.8,
-      alternates: localeAlternates("/compare"),
     },
-    ...competitors.map(slug => ({
-      url: `${baseUrl}/compare/${slug}`,
+    ...comparedCompetitors.map(competitor => ({
+      url: `${baseUrl}${competitor.comparePath}`,
       lastModified: new Date(),
       changeFrequency: "monthly" as const,
       priority: 0.8,
-      alternates: localeAlternates(`/compare/${slug}`),
+    })),
+    ...vsPairs.map(pair => ({
+      url: `${baseUrl}/compare/${pair.slug}`,
+      lastModified: new Date(pair.verifiedOn),
+      changeFrequency: "monthly" as const,
+      priority: 0.8,
     })),
   ];
 
@@ -144,7 +140,7 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
   ];
 
   // Legal / company pages
-  const legalSlugs = ["privacy", "terms-and-conditions", "dpa", "security", "contact"];
+  const legalSlugs = ["privacy", "terms-and-conditions", "dpa", "subprocessors", "security", "contact"];
   const legalPages = legalSlugs.map(slug => ({
     url: `${baseUrl}/${slug}`,
     lastModified: new Date(),

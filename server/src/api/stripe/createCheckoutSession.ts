@@ -1,16 +1,29 @@
+import { roleHasPermission } from "@rybbit/shared";
 import { eq } from "drizzle-orm";
 import { FastifyReply, FastifyRequest } from "fastify";
 import Stripe from "stripe";
 import { db } from "../../db/postgres/postgres.js";
 import { organization, user as userSchema } from "../../db/postgres/schema.js";
-import { getOrgMembership, isOrgOwner } from "../../lib/access.js";
+import { getOrgMembership } from "../../lib/access.js";
 import { stripe } from "../../lib/stripe.js";
+import { hasHadStripeSubscription } from "../../lib/subscriptionUtils.js";
 
 interface CheckoutRequestBody {
   priceId: string;
   returnUrl: string;
   organizationId: string;
   referral?: string;
+}
+
+/** Whether the customer has an active or trialing subscription. Throws if Stripe can't be read. */
+async function hasLiveSubscription(stripeCustomerId: string): Promise<boolean> {
+  // Filter by status on Stripe's side: a status "all" page holds only the newest 100, so a
+  // live subscription behind a long tail of canceled ones would be missed.
+  const statuses = ["active", "trialing"] as const;
+  const pages = await Promise.all(
+    statuses.map(status => (stripe as Stripe).subscriptions.list({ customer: stripeCustomerId, status, limit: 1 }))
+  );
+  return pages.some((page, i) => page.data.some(sub => sub.status === statuses[i]));
 }
 
 export async function createCheckoutSession(
@@ -34,7 +47,7 @@ export async function createCheckoutSession(
     // 1. Verify user has permission to manage billing for this organization
     const membership = await getOrgMembership(userId, organizationId);
 
-    if (!isOrgOwner(membership)) {
+    if (!roleHasPermission(membership?.role, "billing:manage")) {
       return reply.status(403).send({
         error: "Only organization owners can manage billing",
       });
@@ -69,6 +82,21 @@ export async function createCheckoutSession(
     }
 
     let stripeCustomerId = org.stripeCustomerId;
+
+    // A second checkout would start a second subscription billed alongside the first; plan
+    // changes go through update-subscription instead. Read fresh rather than from the
+    // subscription cache so a just-finished checkout is seen.
+    if (stripeCustomerId && (await hasLiveSubscription(stripeCustomerId))) {
+      return reply.status(409).send({
+        error:
+          "This organization already has an active subscription. To change plans, use the Billing page in your organization settings.",
+      });
+    }
+
+    // One free trial per organization. A customer created just below has no history. If the
+    // history can't be read this throws, so checkout fails and can be retried rather than
+    // handing a returning customer another trial.
+    const trialEligible = !(await hasHadStripeSubscription(stripeCustomerId, { throwOnError: true }));
 
     // 3. If the organization doesn't have a Stripe Customer ID, create one
     if (!stripeCustomerId) {
@@ -105,8 +133,8 @@ export async function createCheckoutSession(
       metadata: {
         organizationId: organizationId,
       },
-      // 7-day free trial before charging
-      subscription_data: { trial_period_days: 7 },
+      // 7-day free trial before charging, unless this organization already had one
+      ...(trialEligible && { subscription_data: { trial_period_days: 7 } }),
       // Allow promotion codes
       allow_promotion_codes: true,
       // Enable automatic tax calculation if configured in Stripe Tax settings

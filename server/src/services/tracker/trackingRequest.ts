@@ -1,9 +1,13 @@
 import type { FastifyRequest } from "fastify";
 import { createAsnLookup, type AsnLookup } from "../../db/geolocation/asn.js";
+import type { RateLimitDecision } from "../../lib/apiRateLimit.js";
 import { checkApiKey } from "../../lib/auth-utils.js";
 import { hasScope } from "../../lib/scopes.js";
 import { siteConfig, type SiteConfigData } from "../../lib/siteConfig.js";
 import { getRequestUserAgent } from "../../utils.js";
+import { EventTimeError, resolveEventTime } from "./eventTime.js";
+import type { GeoOverride } from "./geoOverride.js";
+import { RateLimitedIngestError, UntrustedBearerError } from "./ingestErrors.js";
 import { collectCandidateClientIps, resolveClientIp } from "./resolveClientIp.js";
 import type { ValidatedTrackingPayload } from "./trackingPayload.js";
 
@@ -47,11 +51,20 @@ export interface TrackingRequest {
   /** Request-scoped ASN resolver: each IP is looked up at most once per event. */
   lookupAsn: AsnLookup;
   /**
-   * When the request arrived. This is the event's timestamp *and* the instant
+   * When the event happened. This is the event's timestamp *and* the instant
    * that decides which UTC day its salted fingerprint belongs to, so the two can
    * never disagree about the day.
+   *
+   * sp3n/rybbit fork: the arrival time, unless a trusted caller supplied the
+   * event's own time (see eventTime.ts).
    */
   receivedAt: Date;
+  /** sp3n/rybbit fork: `receivedAt` is a trusted caller's event time, not the arrival time. */
+  eventTimeSupplied: boolean;
+  /** sp3n/rybbit fork: a trusted caller's idempotency key for this event; undefined otherwise. */
+  eventId?: string;
+  /** sp3n/rybbit fork: a trusted caller's geography for this event; undefined otherwise. */
+  geoOverride?: GeoOverride;
 }
 
 /**
@@ -61,14 +74,36 @@ export interface TrackingRequest {
  * An under-scoped bearer degrades to untrusted client-side traffic (no 4xx) —
  * this is a public ingestion endpoint, not an authenticated API.
  */
-async function isTrustedServerSideIngestion(request: FastifyRequest, siteId: number): Promise<boolean> {
+export async function isTrustedServerSideIngestion(
+  request: FastifyRequest,
+  siteId: number,
+  carriesTrustedFields = false
+): Promise<boolean> {
   const authHeader = request.headers["authorization"];
   if (typeof authHeader !== "string" || !authHeader.startsWith("Bearer ")) {
     return false;
   }
 
   const apiKeyResult = await checkApiKey(request, { siteId });
-  return apiKeyResult.valid && hasScope(apiKeyResult.statements, { resource: "ingest", action: "write" });
+  // sp3n/rybbit fork: a rate-limited bridge must not be quietly downgraded to
+  // untrusted traffic, which would drop its event time, id and geography and
+  // let it acknowledge the event. It is told to back off instead.
+  if (apiKeyResult.rateLimited && carriesTrustedFields) {
+    throw new RateLimitedIngestError(retryAfterSeconds(apiKeyResult.rateLimit));
+  }
+  const trusted = apiKeyResult.valid && hasScope(apiKeyResult.statements, { resource: "ingest", action: "write" });
+  // Likewise a bridge whose key was revoked or lost its scope: degraded, its
+  // 200 would acknowledge an event recorded at the wrong time, without dedupe
+  // and without waiting for storage. It is refused, so it retries and alerts.
+  if (!trusted && carriesTrustedFields) {
+    throw new UntrustedBearerError();
+  }
+  return trusted;
+}
+
+/** sp3n/rybbit fork: how long a rate-limited bridge should wait, from the limiter's own reset times. */
+function retryAfterSeconds(decision: RateLimitDecision | undefined): number {
+  return Math.max(1, Math.ceil(decision?.retryAfterSeconds || 60));
 }
 
 /**
@@ -83,13 +118,17 @@ export async function resolveTrackingRequest(
 ): Promise<TrackingRequest | null> {
   // Stamped before the first await: a cold Site Configuration read or a slow
   // API-key check must not push the event's time forward into another bucket.
-  const receivedAt = new Date();
+  const arrivedAt = new Date();
 
   const site = await siteConfig.getConfig(payload.site_id);
   if (!site) return null;
 
   const lookupAsn = createAsnLookup();
-  const trustedServerSideIngestion = await isTrustedServerSideIngestion(request, site.siteId);
+  const trustedServerSideIngestion = await isTrustedServerSideIngestion(
+    request,
+    site.siteId,
+    payload.timestamp !== undefined || payload.event_id !== undefined || payload.geo !== undefined
+  );
 
   const requestIpAddress = resolveClientIp(request, { firstPartyProxy: site.firstPartyProxy, lookupAsn });
   const requestUserAgent = getRequestUserAgent(request.headers);
@@ -98,6 +137,12 @@ export async function resolveTrackingRequest(
   // payload's ip_address/user_agent are ignored rather than trusted.
   const ipAddress = trustedServerSideIngestion ? payload.ip_address || requestIpAddress : requestIpAddress;
   const userAgent = trustedServerSideIngestion ? payload.user_agent || requestUserAgent : requestUserAgent;
+
+  // Likewise for the event's time and idempotency key.
+  const eventTime = resolveEventTime(payload.timestamp, trustedServerSideIngestion, arrivedAt);
+  if (!eventTime.ok) {
+    throw new EventTimeError(eventTime.error);
+  }
 
   return {
     payload,
@@ -108,6 +153,9 @@ export async function resolveTrackingRequest(
     trustedServerSideIngestion,
     headers: request.headers,
     lookupAsn,
-    receivedAt,
+    receivedAt: eventTime.eventTime,
+    eventTimeSupplied: eventTime.supplied,
+    eventId: trustedServerSideIngestion ? payload.event_id : undefined,
+    geoOverride: trustedServerSideIngestion ? payload.geo : undefined,
   };
 }

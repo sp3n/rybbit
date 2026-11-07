@@ -1,7 +1,15 @@
 import { Redis } from "ioredis";
 import { createServiceLogger } from "../../lib/logger/logger.js";
 import { API_RATE_LIMIT_LUA } from "./apiRateLimitLua.js";
+import { IMPORT_LOCK_RELEASE_LUA, IMPORT_QUOTA_RESERVE_LUA } from "./importQuotaLua.js";
+import { REPLAY_BUDGET_LUA } from "./replayBudgetLua.js";
 import { STICKY_RESOLVE_LUA } from "./stickyResolveLua.js";
+import {
+  CLAIM_EVENT_ID_LUA,
+  COMPLETE_EVENT_ID_LUA,
+  EVENT_TIME_SESSION_LUA,
+  RELEASE_EVENT_ID_LUA,
+} from "./eventTimeSessionLua.js";
 
 const logger = createServiceLogger("redis");
 
@@ -45,6 +53,9 @@ function createRedisClient(label: string): Redis {
 // general use.
 export const redis = createRedisClient("main");
 
+// Dashboard JSON responses must not queue behind tracking/session commands.
+export const dashboardCacheRedis = createRedisClient("dashboard-cache");
+
 // Dedicated connection for per-event session resolution. Isolated from `redis`
 // so a session GET/SET is never head-of-line blocked behind the anomaly scorer's
 // Lua call — that blocking timed sessions out, and a timed-out session forced the
@@ -79,6 +90,73 @@ interface SessionRedis extends Redis {
  */
 export function sessionGetOrCreate(key: string, candidateId: string, ttlMs: number): Promise<string> {
   return (sessionRedis as SessionRedis).sessionGetOrCreate(key, candidateId, ttlMs);
+}
+
+// sp3n/rybbit fork: event-time sessions and event-id dedupe for trusted
+// server-side events that carry their own time (see eventTimeSessionLua.ts).
+sessionRedis.defineCommand("eventTimeSession", { numberOfKeys: 1, lua: EVENT_TIME_SESSION_LUA });
+sessionRedis.defineCommand("claimEventId", { numberOfKeys: 1, lua: CLAIM_EVENT_ID_LUA });
+sessionRedis.defineCommand("releaseEventId", { numberOfKeys: 1, lua: RELEASE_EVENT_ID_LUA });
+sessionRedis.defineCommand("completeEventId", { numberOfKeys: 1, lua: COMPLETE_EVENT_ID_LUA });
+
+interface EventTimeRedis extends Redis {
+  eventTimeSession(
+    key: string,
+    candidateId: string,
+    eventMs: number,
+    gapMs: number,
+    retentionMs: number,
+    maxSpans: number,
+    nowMs: number
+  ): Promise<string>;
+  claimEventId(key: string, pendingMs: number, token: string): Promise<string>;
+  releaseEventId(key: string, token: string): Promise<number>;
+  completeEventId(key: string, token: string, retentionMs: number): Promise<number>;
+}
+
+/** The session id for an event at `eventMs`, by event time rather than arrival. Atomic across workers. */
+export function eventTimeSession(
+  key: string,
+  candidateId: string,
+  eventMs: number,
+  gapMs: number,
+  retentionMs: number,
+  maxSpans: number
+): Promise<string> {
+  // Integer text, so the script stores the time exactly as given.
+  return (sessionRedis as EventTimeRedis).eventTimeSession(
+    key,
+    candidateId,
+    Math.trunc(eventMs),
+    gapMs,
+    retentionMs,
+    maxSpans,
+    Date.now()
+  );
+}
+
+export type EventIdClaim = "claimed" | "pending" | "done";
+
+/** Claim `key` as pending under `token`; or report that another delivery has it pending, or already recorded it. */
+export async function claimEventId(key: string, pendingMs: number, token: string): Promise<EventIdClaim> {
+  return (await (sessionRedis as EventTimeRedis).claimEventId(key, pendingMs, token)) as EventIdClaim;
+}
+
+/**
+ * Mark a claimed event as recorded, so every later delivery is dropped as a
+ * duplicate. Leaves a claim another delivery took over after this one's lease
+ * expired.
+ */
+export async function completeEventId(key: string, token: string, retentionMs: number): Promise<void> {
+  await (sessionRedis as EventTimeRedis).completeEventId(key, token, retentionMs);
+}
+
+/**
+ * Give a pending claim back, so a delivery that failed to record its event can
+ * be retried. Only the claim made with `token` is removed.
+ */
+export async function releaseEventId(key: string, token: string): Promise<void> {
+  await (sessionRedis as EventTimeRedis).releaseEventId(key, token);
 }
 
 // Dedicated connection for sticky identity re-attachment, isolated for the same
@@ -154,6 +232,39 @@ export function stickyResolve(input: StickyResolveInput): Promise<[string, Stick
     input.aliasKeyPrefix,
     input.maxCandidates
   );
+}
+
+// Dedicated connection for the per-session replay byte budget. Every replay
+// batch runs this script, so it gets its own connection for the same reason as
+// `sessionRedis`.
+export const replayBudgetRedis = createRedisClient("replay-budget");
+
+replayBudgetRedis.defineCommand("replayBudgetCharge", {
+  numberOfKeys: 1,
+  lua: REPLAY_BUDGET_LUA,
+});
+
+interface ReplayBudgetRedis extends Redis {
+  replayBudgetCharge(key: string, bytes: number, capBytes: number, ttlMs: number): Promise<[number, number]>;
+}
+
+/**
+ * Charge `bytes` against a session's replay budget. Accepted while the session
+ * is under `capBytes`; the TTL slides on every call. Atomic across all workers.
+ */
+export async function replayBudgetCharge(
+  key: string,
+  bytes: number,
+  capBytes: number,
+  ttlMs: number
+): Promise<{ accepted: boolean; usedBytes: number }> {
+  const [accepted, usedBytes] = await (replayBudgetRedis as ReplayBudgetRedis).replayBudgetCharge(
+    key,
+    bytes,
+    capBytes,
+    ttlMs
+  );
+  return { accepted: accepted === 1, usedBytes };
 }
 
 // Dedicated connection for API-key rate limiting, isolated for the same reason
@@ -373,4 +484,51 @@ export async function anomalyObserve(nowMs: number, specs: AnomalyCounterSpec[])
     top: flat[index * 3 + 1] ?? 0,
     distinct: flat[index * 3 + 2] ?? 0,
   }));
+}
+
+// Data import lock and monthly quota (importQuotaManager), shared so every cluster
+// worker enforces one import per organization and one quota. Imports are rare and
+// each call is a single small script, so they use the main connection.
+redis.defineCommand("importLockRelease", { numberOfKeys: 1, lua: IMPORT_LOCK_RELEASE_LUA });
+redis.defineCommand("importQuotaReserve", { numberOfKeys: 1, lua: IMPORT_QUOTA_RESERVE_LUA });
+
+interface ImportRedis extends Redis {
+  importLockRelease(key: string, owner: string): Promise<number>;
+  importQuotaReserve(key: string, ...args: (string | number)[]): Promise<number[]>;
+}
+
+/** Takes the lock for `owner` unless someone holds it. Atomic across all workers. */
+export async function importLockAcquire(key: string, owner: string, ttlMs: number): Promise<boolean> {
+  return (await redis.set(key, owner, "PX", ttlMs, "NX")) === "OK";
+}
+
+/** Releases the lock if `owner` still holds it. */
+export async function importLockRelease(key: string, owner: string): Promise<boolean> {
+  return (await (redis as ImportRedis).importLockRelease(key, owner)) === 1;
+}
+
+export interface ImportQuotaRequest {
+  /** yyyyMM */
+  month: string;
+  /** Events the caller knows are counted for the month; the shared count never drops below it. */
+  baseline: number;
+  requested: number;
+}
+
+/**
+ * Reserves up to `requested` events per month against `monthlyLimit` and returns how many
+ * were granted, in the same order. Atomic across all workers; one round-trip.
+ */
+export async function importQuotaReserve(
+  key: string,
+  monthlyLimit: number,
+  ttlMs: number,
+  requests: ImportQuotaRequest[]
+): Promise<number[]> {
+  const args: (string | number)[] = [monthlyLimit, ttlMs];
+  for (const request of requests) {
+    args.push(request.month, request.baseline, request.requested);
+  }
+  const granted = await (redis as ImportRedis).importQuotaReserve(key, ...args);
+  return requests.map((_, index) => Number(granted[index] ?? 0));
 }
