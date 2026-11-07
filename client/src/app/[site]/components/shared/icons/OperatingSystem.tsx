@@ -31,7 +31,7 @@ export const OS_TO_LOGO: Record<string, string> = {
   Ubuntu: "Ubuntu.svg",
   HarmonyOS: "HarmonyOS.svg",
   OpenHarmony: "OpenHarmony.png",
-  PlayStation: "Playstation.svg",
+  PlayStation: "PlayStation.svg",
   Tizen: "Tizen.png",
   Symbian: "Symbian.svg",
   Debian: "Debian.svg",
